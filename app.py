@@ -1,0 +1,789 @@
+import streamlit as st
+import streamlit.components.v1 as components
+import requests, json, time
+from datetime import datetime
+import io
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+# ─────────────────────────────────────────────
+st.set_page_config(page_title="Kanban Frotas", page_icon="🌾",
+                   layout="wide", initial_sidebar_state="collapsed")
+
+# ── CONFIGURAÇÃO ─────────────────────────────
+TENANT_ID     = st.secrets["TENANT_ID"]
+CLIENT_ID     = st.secrets["CLIENT_ID"]
+CLIENT_SECRET = st.secrets["CLIENT_SECRET"]
+SITE_HOST     = st.secrets.get("SITE_HOST", "metalcana.sharepoint.com")
+SITE_NAME     = st.secrets.get("SITE_NAME", "AppKanbanFrotas")
+LISTA_CC      = st.secrets.get("LISTA_CC",      "KanbanCC")
+LISTA_FRENTES = st.secrets.get("LISTA_FRENTES", "KanbanFrentes")
+LISTA_FROTAS  = st.secrets.get("LISTA_FROTAS",  "KanbanFrotas")
+
+TIPOS = ["Colhedora","Transbordo","Trator","Caminhão","Veículo","Implemento","Apoio","Outro"]
+TIPO_EMOJI = {"Colhedora":"🌾","Transbordo":"🚛","Trator":"🚜","Caminhão":"🚚",
+               "Veículo":"🚗","Implemento":"⚙️","Apoio":"🔧","Outro":"📦"}
+CORES_CC = ["#1D9E75","#378ADD","#BA7517","#D85A30","#7F77DD","#D4537E",
+            "#639922","#0F6E56","#185FA5","#854F0B","#993C1D","#534AB7",
+            "#3B6D11","#A32D2D","#5b21b6","#9d174d","#166534","#374151"]
+TIPO_COR = {
+    "Colhedora":  ["#d1fae5","#065f46"], "Transbordo": ["#dbeafe","#1e40af"],
+    "Trator":     ["#fef3c7","#92400e"], "Caminhão":   ["#ede9fe","#5b21b6"],
+    "Veículo":    ["#fce7f3","#9d174d"], "Implemento": ["#f0fdf4","#166534"],
+    "Apoio":      ["#fee2e2","#991b1b"], "Outro":      ["#f3f4f6","#374151"],
+}
+
+# ─────────────────────────────────────────────
+# GRAPH API
+# ─────────────────────────────────────────────
+@st.cache_data(ttl=3500)
+def get_token():
+    r = requests.post(
+        f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token",
+        data={"grant_type":"client_credentials","client_id":CLIENT_ID,
+              "client_secret":CLIENT_SECRET,"scope":"https://graph.microsoft.com/.default"})
+    r.raise_for_status()
+    return r.json()["access_token"]
+
+@st.cache_data(ttl=3500)
+def get_site_id():
+    token = get_token()
+    r = requests.get(
+        f"https://graph.microsoft.com/v1.0/sites/{SITE_HOST}:/sites/{SITE_NAME}",
+        headers={"Authorization": f"Bearer {token}"})
+    r.raise_for_status()
+    return r.json()["id"]
+
+def hdrs():
+    return {"Authorization": f"Bearer {get_token()}", "Content-Type": "application/json"}
+
+def lista_items(lista_nome):
+    site_id = get_site_id()
+    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists/{lista_nome}/items?expand=fields&$top=2000"
+    r = requests.get(url, headers=hdrs())
+    r.raise_for_status()
+    return r.json().get("value", [])
+
+def patch_item(lista_nome, item_id, fields):
+    site_id = get_site_id()
+    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists/{lista_nome}/items/{item_id}/fields"
+    r = requests.patch(url, headers=hdrs(), json=fields)
+    r.raise_for_status()
+    return r.json()
+
+def criar_item(lista_nome, fields):
+    site_id = get_site_id()
+    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/lists/{lista_nome}/items"
+    r = requests.post(url, headers=hdrs(), json={"fields": fields})
+    r.raise_for_status()
+    return r.json()
+
+# ─────────────────────────────────────────────
+# CARREGAR DADOS
+# ─────────────────────────────────────────────
+@st.cache_data(ttl=30)
+def carregar_dados():
+    ccs_raw     = lista_items(LISTA_CC)
+    frentes_raw = lista_items(LISTA_FRENTES)
+    frotas_raw  = lista_items(LISTA_FROTAS)
+
+    ccs = sorted([{
+        "id":    item["id"],
+        "nome":  item["fields"].get("Title",""),
+        "ordem": int(item["fields"].get("Ordem", 99)),
+    } for item in ccs_raw], key=lambda x: x["ordem"])
+
+    frentes = [{"id": item["id"], "nome": item["fields"].get("Title","")}
+               for item in frentes_raw]
+
+    frotas = [{
+        "id":          item["id"],
+        "nome":        item["fields"].get("Title",""),
+        "tipo":        item["fields"].get("Tipo","Outro"),
+        "chassi":      item["fields"].get("Chassi",""),
+        "ano":         item["fields"].get("Ano",""),
+        "obs":         item["fields"].get("Obs",""),
+        "cc_nome":     item["fields"].get("CCNome",""),
+        "frente_nome": item["fields"].get("FrenteNome",""),
+        "status":      item["fields"].get("Status","Ativo"),
+        "data_venda":  item["fields"].get("DataVenda",""),
+        "valor_venda": item["fields"].get("ValorVenda",""),
+    } for item in frotas_raw]
+
+    return ccs, frentes, frotas
+
+def invalidar():
+    carregar_dados.clear()
+
+# ─────────────────────────────────────────────
+# AÇÕES
+# ─────────────────────────────────────────────
+def mover_cc(frota_id, novo_cc):
+    patch_item(LISTA_FROTAS, frota_id, {"CCNome": novo_cc, "FrenteNome": ""})
+    invalidar()
+
+def mover_frente(frota_id, nova_frente):
+    patch_item(LISTA_FROTAS, frota_id, {"FrenteNome": nova_frente})
+    invalidar()
+
+def vender_frota(frota_id, data_venda, valor_venda, obs_venda):
+    patch_item(LISTA_FROTAS, frota_id, {
+        "Status": "Vendido", "CCNome": "", "FrenteNome": "",
+        "DataVenda": data_venda, "ValorVenda": valor_venda,
+        "Obs": obs_venda,
+    })
+    invalidar()
+
+def reativar_frota(frota_id):
+    patch_item(LISTA_FROTAS, frota_id, {
+        "Status": "Ativo", "DataVenda": "", "ValorVenda": "",
+    })
+    invalidar()
+
+# ─────────────────────────────────────────────
+# CARREGAR
+# ─────────────────────────────────────────────
+try:
+    ccs, frentes, frotas = carregar_dados()
+except Exception as e:
+    st.error(f"Erro ao conectar ao SharePoint: {e}")
+    st.stop()
+
+# Separa ativos e vendidos
+frotas_ativas  = [f for f in frotas if f.get("status","Ativo") != "Vendido"]
+frotas_vendidas = [f for f in frotas if f.get("status","Ativo") == "Vendido"]
+
+# ─────────────────────────────────────────────
+# PROCESSAR AÇÕES (query params)
+# ─────────────────────────────────────────────
+params   = st.query_params
+acao     = params.get("acao","")
+frota_id = params.get("frota_id","")
+valor    = params.get("valor","")
+
+if acao == "mover_cc" and frota_id and valor is not None:
+    try:
+        mover_cc(frota_id, valor)
+        st.query_params.clear(); st.rerun()
+    except Exception as e:
+        st.error(f"Erro ao mover: {e}")
+elif acao == "mover_frente" and frota_id:
+    try:
+        mover_frente(frota_id, valor if valor != "__sem__" else "")
+        st.query_params.clear(); st.rerun()
+    except Exception as e:
+        st.error(f"Erro ao salvar frente: {e}")
+
+# ─────────────────────────────────────────────
+# CSS
+# ─────────────────────────────────────────────
+st.markdown("""
+<style>
+#MainMenu, footer, header {visibility: hidden;}
+.block-container {padding: 1rem 1.5rem !important;}
+.stTabs [data-baseweb="tab-list"] {gap: 8px;}
+.stTabs [data-baseweb="tab"] {padding: 6px 16px; border-radius: 8px 8px 0 0;}
+</style>
+""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────
+# ABAS PRINCIPAIS
+# ─────────────────────────────────────────────
+st.markdown("### 🌾 Kanban Frotas — Teston / Metalcana")
+aba_board, aba_nova, aba_vendidos, aba_export = st.tabs([
+    "🗂️ Board Kanban",
+    "➕ Nova Frota",
+    "📋 Histórico de Baixas",
+    "📤 Exportar Relatório",
+])
+
+# ══════════════════════════════════════════════
+# ABA 1 — BOARD KANBAN
+# ══════════════════════════════════════════════
+with aba_board:
+
+    # ── FILTROS ──────────────────────────────
+    f1, f2, f3 = st.columns([2, 2, 2])
+    with f1:
+        filtro_tipo = st.multiselect("🔧 Tipo", TIPOS, default=[], placeholder="Todos os tipos")
+    with f2:
+        busca = st.text_input("🔍 Buscar frota", placeholder="Número ou nome...")
+    with f3:
+        nomes_frente_opc = ["— Todas as frentes —"] + [fr["nome"] for fr in frentes]
+        filtro_frente = st.selectbox("⚡ Frente de corte", nomes_frente_opc,
+                                     help="Filtra todos os equipamentos da frente selecionada")
+
+    f4, f5 = st.columns([2, 2])
+    with f4:
+        nomes_cc_opc = ["— Todos os CCs —"] + [c["nome"] for c in ccs]
+        filtro_origem_idx = 0
+        # Auto-preenche origem quando há busca com resultado único
+        if busca:
+            matches = [f for f in frotas_ativas if busca.lower() in f["nome"].lower()]
+            if len(matches) == 1 and matches[0]["cc_nome"]:
+                cc_match = matches[0]["cc_nome"]
+                if cc_match in nomes_cc_opc:
+                    filtro_origem_idx = nomes_cc_opc.index(cc_match)
+        filtro_cc_origem = st.selectbox("📍 CC de origem", nomes_cc_opc,
+                                        index=filtro_origem_idx,
+                                        help="Preenchido automaticamente ao buscar uma frota")
+    with f5:
+        nomes_cc_dest = ["— Sem filtro destino —"] + [c["nome"] for c in ccs] + ["📦 Sem alocação"]
+        filtro_cc_destino = st.selectbox("🎯 CC de destino", nomes_cc_dest)
+
+    # ── LÓGICA DO BOARD ───────────────────────
+    ccs_todos = ccs + [{"id":"__sem__","nome":"📦 Sem alocação","ordem":999}]
+    cc_origem_ativo  = filtro_cc_origem  != "— Todos os CCs —"
+    cc_destino_ativo = filtro_cc_destino != "— Sem filtro destino —"
+
+    def frota_vis(f):
+        if filtro_tipo and f["tipo"] not in filtro_tipo: return False
+        if busca and busca.lower() not in f["nome"].lower(): return False
+        if filtro_frente != "— Todas as frentes —" and f.get("frente_nome","") != filtro_frente: return False
+        return True
+
+    # Quais colunas mostrar
+    frente_ativa = filtro_frente != "— Todas as frentes —"
+    if cc_origem_ativo and cc_destino_ativo:
+        nomes_mostrar = list(dict.fromkeys([filtro_cc_origem, filtro_cc_destino]))
+        ccs_board = [c for c in ccs_todos if c["nome"] in nomes_mostrar]
+        ccs_board.sort(key=lambda c: 0 if c["nome"] == filtro_cc_origem else 1)
+    elif cc_origem_ativo:
+        ccs_board = [c for c in ccs_todos if c["nome"] == filtro_cc_origem]
+    elif frente_ativa:
+        # Mostra só CCs que têm frotas dessa frente
+        ccs_com_frente = {f["cc_nome"] if f["cc_nome"] else "📦 Sem alocação"
+                          for f in frotas_ativas if f.get("frente_nome","") == filtro_frente}
+        ccs_board = [c for c in ccs_todos if c["nome"] in ccs_com_frente]
+    else:
+        ccs_board = ccs_todos
+
+    # IDs destacados (frotas que batem na busca/origem)
+    def frota_destacada(f):
+        if not frota_vis(f): return False
+        if cc_origem_ativo:
+            cc_f = f["cc_nome"] if f["cc_nome"] else "📦 Sem alocação"
+            if cc_f != filtro_cc_origem: return False
+        return True
+
+    frotas_board   = [f for f in frotas_ativas if frota_vis(f)]
+    ids_destacados = {f["id"] for f in frotas_ativas if frota_destacada(f)} if (cc_origem_ativo or busca or frente_ativa) else set()
+
+    nomes_cc = [c["nome"] for c in ccs_todos]
+    nomes_fr = ["— Sem frente —"] + [fr["nome"] for fr in frentes]
+
+    frotas_por_cc = {
+        cc["nome"]: [f for f in frotas_board
+                     if f["cc_nome"] == (cc["nome"] if cc["id"] != "__sem__" else "")]
+        for cc in ccs_board
+    }
+
+    board_data = {
+        "ccs": [{
+            "nome":     c["nome"],
+            "cor":      CORES_CC[i % len(CORES_CC)],
+            "destaque": c["nome"] == filtro_cc_origem  if cc_origem_ativo  else False,
+            "destino":  c["nome"] == filtro_cc_destino if cc_destino_ativo else False,
+        } for i,c in enumerate(ccs_todos) if c in ccs_board],
+        "ids_destacados": list(ids_destacados),
+        "frotas_por_cc": {
+            cc["nome"]: [{
+                "id":        f["id"],
+                "nome":      f["nome"],
+                "tipo":      f["tipo"],
+                "emoji":     TIPO_EMOJI.get(f["tipo"],"📦"),
+                "chassi":    f["chassi"],
+                "ano":       f["ano"],
+                "frente":    f["frente_nome"],
+                "cor_bg":    TIPO_COR.get(f["tipo"],["#f3f4f6","#374151"])[0],
+                "cor_tx":    TIPO_COR.get(f["tipo"],["#f3f4f6","#374151"])[1],
+                "destacado": f["id"] in ids_destacados,
+            } for f in frotas_por_cc[cc["nome"]]]
+            for cc in ccs_board
+        },
+        "nomes_cc": nomes_cc,
+        "nomes_fr": nomes_fr,
+    }
+
+    # ── MÉTRICAS ─────────────────────────────
+    total    = len(frotas_board)
+    alocadas = sum(1 for f in frotas_board if f["cc_nome"])
+    colh     = sum(1 for f in frotas_board if f["tipo"] == "Colhedora")
+    sem_fr   = sum(1 for f in frotas_board if f["cc_nome"] and not f["frente_nome"])
+
+    m1,m2,m3,m4 = st.columns(4)
+    for col, val, lbl, cor in [
+        (m1, total,    "Frotas ativas",      "#111"),
+        (m2, alocadas, "Alocadas",           "#065f46"),
+        (m3, colh,     "Colhedoras",         "#1D9E75"),
+        (m4, sem_fr,   "Alocadas s/ frente", "#dc2626" if sem_fr else "#111"),
+    ]:
+        col.markdown(
+            f'<div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;'
+            f'padding:8px 14px;text-align:center;margin-bottom:8px">'
+            f'<div style="font-size:24px;font-weight:700;color:{cor}">{val}</div>'
+            f'<div style="font-size:11px;color:#6b7280">{lbl}</div></div>',
+            unsafe_allow_html=True)
+
+    # ── BOARD HTML ────────────────────────────
+    board_json = json.dumps(board_data, ensure_ascii=False)
+
+    BOARD_HTML = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>
+*{{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}}
+body{{background:transparent;overflow-x:auto;}}
+#board{{display:flex;gap:12px;padding:4px 2px 16px;align-items:flex-start;min-height:480px;}}
+.column{{min-width:220px;width:220px;flex-shrink:0;background:#f8fafc;border-radius:10px;border:1px solid #e2e8f0;overflow:hidden;}}
+.col-header{{padding:9px 12px;display:flex;align-items:center;justify-content:space-between;color:#fff;font-size:12px;font-weight:700;border-radius:10px 10px 0 0;}}
+.col-header.col-origem{{outline:3px solid #fbbf24;outline-offset:-2px;}}
+.col-header.col-destino{{outline:3px solid #34d399;outline-offset:-2px;}}
+.col-badge{{background:rgba(255,255,255,.28);border-radius:20px;padding:1px 8px;font-size:11px;}}
+.col-label{{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;padding:2px 8px;text-align:center;}}
+.col-label.origem{{background:#fef3c7;color:#92400e;}}
+.col-label.destino{{background:#d1fae5;color:#065f46;}}
+.cards-list{{min-height:60px;padding:8px;display:flex;flex-direction:column;gap:6px;transition:background .15s;}}
+.cards-list.drag-over{{background:#e0f2fe;border-radius:0 0 8px 8px;}}
+.card{{background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px;cursor:grab;user-select:none;border-left:4px solid #1D9E75;transition:box-shadow .15s,transform .1s,opacity .15s;}}
+.card:hover{{box-shadow:0 2px 8px rgba(0,0,0,.10);}}
+.card:active{{cursor:grabbing;transform:scale(.97);}}
+.card.dragging{{opacity:.35;}}
+.card.drag-ghost{{box-shadow:0 8px 24px rgba(0,0,0,.18);transform:rotate(2deg) scale(1.03);opacity:.95;pointer-events:none;position:fixed;z-index:9999;width:210px;}}
+.card.destacado{{border-left-width:5px;box-shadow:0 0 0 2px #fbbf24;background:#fffbeb;}}
+.card.nao-destacado{{opacity:.25;filter:grayscale(.6);pointer-events:none;}}
+.card-name{{font-size:12px;font-weight:600;color:#111;margin-bottom:2px;}}
+.card-sub{{font-size:10px;color:#6b7280;margin-bottom:4px;}}
+.card-tag{{display:inline-block;padding:1px 7px;border-radius:20px;font-size:10px;font-weight:600;margin-right:4px;}}
+.card-frente{{font-size:10px;color:#374151;margin-top:4px;padding:2px 6px;background:#f1f5f9;border-radius:4px;display:inline-flex;align-items:center;gap:4px;cursor:pointer;}}
+.card-frente:hover{{background:#dbeafe;color:#1e40af;}}
+.empty-hint{{text-align:center;font-size:11px;color:#9ca3af;padding:14px 6px;border:1px dashed #d1d5db;border-radius:6px;}}
+.modal-bg{{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10000;align-items:center;justify-content:center;}}
+.modal-bg.open{{display:flex;}}
+.modal{{background:#fff;border-radius:12px;padding:20px;width:340px;box-shadow:0 20px 60px rgba(0,0,0,.25);}}
+.modal h3{{font-size:15px;font-weight:600;margin-bottom:6px;color:#111;}}
+.modal .sub{{font-size:12px;color:#6b7280;margin-bottom:16px;}}
+.modal select{{width:100%;padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;font-size:13px;margin-bottom:14px;background:#fff;color:#111;}}
+.modal-btns{{display:flex;gap:8px;justify-content:flex-end;}}
+.btn{{padding:7px 16px;border-radius:8px;font-size:13px;cursor:pointer;border:1px solid #d1d5db;background:#fff;color:#111;}}
+.btn:hover{{background:#f1f5f9;}}
+.btn.primary{{background:#1D9E75;color:#fff;border-color:#0F6E56;}}
+.btn.primary:hover{{background:#0F6E56;}}
+.btn.danger{{background:#fee2e2;color:#991b1b;border-color:#fca5a5;}}
+.btn.danger:hover{{background:#fecaca;}}
+</style></head><body>
+<div id="board"></div>
+<div class="modal-bg" id="modalBg">
+  <div class="modal">
+    <h3 id="modalNome"></h3>
+    <div class="sub" id="modalSub"></div>
+    <select id="modalSelect"></select>
+    <div class="modal-btns">
+      <button class="btn danger" onclick="marcarVendido()">🪦 Marcar vendido</button>
+      <button class="btn" onclick="fecharModal()">Cancelar</button>
+      <button class="btn primary" onclick="salvarFrente()">Salvar frente</button>
+    </div>
+  </div>
+</div>
+<script>
+const DATA = {board_json};
+const nomesCc = DATA.nomes_cc;
+const nomesFr = DATA.nomes_fr;
+let dragFrotaId=null,dragFrotaNome=null,dragEl=null,ghostEl=null,modalFrotaId=null;
+
+function render(){{
+  const board=document.getElementById('board');
+  board.innerHTML='';
+  DATA.ccs.forEach(cc=>{{
+    const cards=DATA.frotas_por_cc[cc.nome]||[];
+    const col=document.createElement('div');
+    col.className='column';
+    const origemCls =cc.destaque?' col-origem':'';
+    const destinoCls=cc.destino?' col-destino':'';
+    const labelO=cc.destaque?'<div class="col-label origem">📍 Origem</div>':'';
+    const labelD=cc.destino ?'<div class="col-label destino">🎯 Destino</div>':'';
+    col.innerHTML=`
+      <div class="col-header${{origemCls}}${{destinoCls}}" style="background:${{cc.cor}}">
+        <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:160px" title="${{cc.nome}}">${{cc.nome}}</span>
+        <span class="col-badge">${{cards.length}}</span>
+      </div>${{labelO}}${{labelD}}
+      <div class="cards-list" data-cc="${{cc.nome}}" id="list-${{cc.nome.replace(/[^a-z0-9]/gi,'_')}}"></div>`;
+    board.appendChild(col);
+    const list=col.querySelector('.cards-list');
+    setupDrop(list,cc.nome);
+    if(cards.length===0){{list.innerHTML='<div class="empty-hint">Sem frotas</div>';}}
+    else{{
+      const temDest=DATA.ids_destacados&&DATA.ids_destacados.length>0;
+      cards.forEach(f=>list.appendChild(criarCard(f,cc.cor,temDest)));
+    }}
+  }});
+}}
+
+function criarCard(frota,corCC,temDest){{
+  const el=document.createElement('div');
+  let cls='card';
+  if(temDest) cls+=frota.destacado?' destacado':' nao-destacado';
+  el.className=cls;
+  el.dataset.id=frota.id;
+  el.style.borderLeftColor=corCC;
+  const sub=[frota.chassi,frota.ano].filter(Boolean).join(' | ');
+  const frLabel=frota.frente||'+ frente';
+  el.innerHTML=`
+    <div class="card-name">${{frota.emoji}} ${{frota.nome}}</div>
+    ${{sub?`<div class="card-sub">${{sub}}</div>`:''}}
+    <span class="card-tag" style="background:${{frota.cor_bg}};color:${{frota.cor_tx}}">${{frota.tipo}}</span>
+    <div class="card-frente" onclick="abrirModal(event,'${{frota.id}}','${{frota.nome.replace(/'/g,"\\'")}}','${{(frota.frente||'').replace(/'/g,"\\'")}}')" >⚡ ${{frLabel}}</div>`;
+  el.draggable=true;
+  el.addEventListener('dragstart',e=>{{
+    dragFrotaId=frota.id;dragEl=el;
+    setTimeout(()=>el.classList.add('dragging'),0);
+    e.dataTransfer.effectAllowed='move';
+    ghostEl=el.cloneNode(true);
+    ghostEl.className='card drag-ghost';
+    ghostEl.style.cssText+=`;left:${{e.clientX}}px;top:${{e.clientY}}px`;
+    document.body.appendChild(ghostEl);
+    e.dataTransfer.setDragImage(new Image(),0,0);
+  }});
+  el.addEventListener('drag',e=>{{if(ghostEl&&e.clientX>0){{ghostEl.style.left=(e.clientX+12)+'px';ghostEl.style.top=(e.clientY-20)+'px';}}}});
+  el.addEventListener('dragend',()=>{{
+    el.classList.remove('dragging');
+    if(ghostEl){{ghostEl.remove();ghostEl=null;}}
+    dragFrotaId=dragEl=null;
+  }});
+  return el;
+}}
+
+function setupDrop(listEl,ccNome){{
+  listEl.addEventListener('dragover',e=>{{e.preventDefault();listEl.classList.add('drag-over');}});
+  listEl.addEventListener('dragleave',e=>{{if(!listEl.contains(e.relatedTarget))listEl.classList.remove('drag-over');}});
+  listEl.addEventListener('drop',e=>{{
+    e.preventDefault();listEl.classList.remove('drag-over');
+    if(!dragFrotaId)return;
+    let ccAtual='';
+    for(const cc of DATA.ccs){{if((DATA.frotas_por_cc[cc.nome]||[]).some(f=>f.id===dragFrotaId)){{ccAtual=cc.nome;break;}}}}
+    if(ccAtual===ccNome)return;
+    for(const cc of DATA.ccs){{
+      const lista=DATA.frotas_por_cc[cc.nome];if(!lista)continue;
+      const idx=lista.findIndex(f=>f.id===dragFrotaId);
+      if(idx!==-1){{const[frota]=lista.splice(idx,1);frota.frente='';if(!DATA.frotas_por_cc[ccNome])DATA.frotas_por_cc[ccNome]=[];DATA.frotas_por_cc[ccNome].push(frota);break;}}
+    }}
+    render();
+    const url=new URL(window.parent.location.href);
+    url.searchParams.set('acao','mover_cc');
+    url.searchParams.set('frota_id',dragFrotaId);
+    url.searchParams.set('valor',ccNome==='📦 Sem alocação'?'':ccNome);
+    window.parent.location.href=url.toString();
+  }});
+}}
+
+function abrirModal(e,frotaId,frotaNome,frenteAtual){{
+  e.stopPropagation();
+  modalFrotaId=frotaId;
+  document.getElementById('modalNome').textContent=frotaNome;
+  document.getElementById('modalSub').textContent=frenteAtual?`Frente atual: ${{frenteAtual}}`:'Sem frente definida';
+  const sel=document.getElementById('modalSelect');
+  sel.innerHTML='';
+  nomesFr.forEach(fr=>{{
+    const opt=document.createElement('option');
+    opt.value=fr==='— Sem frente —'?'__sem__':fr;
+    opt.textContent=fr;
+    if(fr===frenteAtual||(fr==='— Sem frente —'&&!frenteAtual))opt.selected=true;
+    sel.appendChild(opt);
+  }});
+  document.getElementById('modalBg').classList.add('open');
+}}
+function fecharModal(){{document.getElementById('modalBg').classList.remove('open');modalFrotaId=null;}}
+function salvarFrente(){{
+  if(!modalFrotaId)return;
+  const val=document.getElementById('modalSelect').value;
+  fecharModal();
+  const url=new URL(window.parent.location.href);
+  url.searchParams.set('acao','mover_frente');
+  url.searchParams.set('frota_id',modalFrotaId);
+  url.searchParams.set('valor',val);
+  window.parent.location.href=url.toString();
+}}
+function marcarVendido(){{
+  if(!modalFrotaId)return;
+  fecharModal();
+  const url=new URL(window.parent.location.href);
+  url.searchParams.set('acao','vender');
+  url.searchParams.set('frota_id',modalFrotaId);
+  url.searchParams.set('valor','vendido');
+  window.parent.location.href=url.toString();
+}}
+document.getElementById('modalBg').addEventListener('click',e=>{{if(e.target===document.getElementById('modalBg'))fecharModal();}});
+render();
+</script></body></html>"""
+
+    components.html(BOARD_HTML, height=680, scrolling=True)
+
+    # ── Modal vender (via Streamlit) ──────────
+    if acao == "vender" and frota_id:
+        frota_obj = next((f for f in frotas_ativas if f["id"] == frota_id), None)
+        if frota_obj:
+            with st.form("form_venda"):
+                st.subheader(f"🪦 Marcar como vendido: {frota_obj['nome']}")
+                dv = st.date_input("Data da venda", value=datetime.today())
+                vv = st.text_input("Valor de venda (R$)", placeholder="Ex: 150000")
+                ov = st.text_input("Observação", placeholder="Comprador, motivo...")
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.form_submit_button("✅ Confirmar venda", type="primary"):
+                        vender_frota(frota_id, str(dv), vv, ov)
+                        st.query_params.clear(); st.rerun()
+                with c2:
+                    if st.form_submit_button("Cancelar"):
+                        st.query_params.clear(); st.rerun()
+
+# ══════════════════════════════════════════════
+# ABA 2 — NOVA FROTA
+# ══════════════════════════════════════════════
+with aba_nova:
+    st.subheader("➕ Cadastrar nova frota")
+    st.caption("Preencha os dados do novo equipamento adquirido.")
+
+    with st.form("form_nova_frota", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            nn = st.text_input("Nome / Identificação *", placeholder="1600 - TRATOR NEW HOLLAND T7.245")
+            nt = st.selectbox("Tipo *", TIPOS)
+            nm = st.text_input("Modelo", placeholder="New Holland T7.245")
+        with c2:
+            nch = st.text_input("Chassi", placeholder="HCCZ7245XXXX")
+            nan = st.text_input("Ano", placeholder="2026")
+            nobs = st.text_input("Observação", placeholder="Notas sobre o equipamento")
+
+        st.divider()
+        st.markdown("**Alocação inicial (opcional)**")
+        ca1, ca2 = st.columns(2)
+        with ca1:
+            ncc_opc = ["— Sem alocação (disponível) —"] + [c["nome"] for c in ccs]
+            ncc = st.selectbox("Centro de Custo", ncc_opc)
+        with ca2:
+            nfr_opc = ["— Sem frente —"] + [fr["nome"] for fr in frentes]
+            nfr = st.selectbox("Frente de Corte", nfr_opc)
+
+        submitted = st.form_submit_button("💾 Cadastrar frota", type="primary", use_container_width=True)
+
+    if submitted:
+        if not nn.strip():
+            st.error("Nome é obrigatório.")
+        else:
+            cc_val = "" if ncc == "— Sem alocação (disponível) —" else ncc
+            fr_val = "" if nfr == "— Sem frente —" else nfr
+            try:
+                criar_item(LISTA_FROTAS, {
+                    "Title": nn.strip(), "Tipo": nt, "Chassi": nch.strip(),
+                    "Ano": nan.strip(), "Obs": nobs.strip(),
+                    "CCNome": cc_val, "FrenteNome": fr_val,
+                    "Status": "Ativo", "DataVenda": "", "ValorVenda": "",
+                })
+                invalidar()
+                st.success(f"✅ Frota '{nn}' cadastrada com sucesso!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erro ao cadastrar: {e}")
+
+    # Lista de frotas disponíveis (sem CC)
+    disponiveis = [f for f in frotas_ativas if not f["cc_nome"]]
+    if disponiveis:
+        st.divider()
+        st.markdown(f"**📦 Frotas disponíveis sem alocação ({len(disponiveis)})**")
+        for f in sorted(disponiveis, key=lambda x: x["nome"]):
+            bg, tx = TIPO_COR.get(f["tipo"], ["#f3f4f6","#374151"])
+            st.markdown(
+                f'<div style="background:#fff;border:1px solid #e5e7eb;border-radius:8px;'
+                f'padding:8px 12px;margin-bottom:6px;display:flex;align-items:center;gap:8px;">'
+                f'<span style="font-size:13px;font-weight:600">{TIPO_EMOJI.get(f["tipo"],"📦")} {f["nome"]}</span>'
+                f'<span style="background:{bg};color:{tx};padding:1px 8px;border-radius:20px;font-size:11px;font-weight:600">{f["tipo"]}</span>'
+                f'<span style="font-size:11px;color:#6b7280">{f.get("chassi","")} {f.get("ano","")}</span>'
+                f'</div>', unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════
+# ABA 3 — FROTAS VENDIDAS / DESCARTE
+# ══════════════════════════════════════════════
+with aba_vendidos:
+    st.subheader(f"📋 Histórico de Baixas — {len(frotas_vendidas)} equipamentos")
+    st.caption("Equipamentos vendidos, descartados ou baixados do patrimônio.")
+
+    if not frotas_vendidas:
+        st.info("Nenhuma frota vendida ou descartada ainda.")
+    else:
+        # Filtros
+        bv1, bv2 = st.columns([2,2])
+        with bv1:
+            busca_v = st.text_input("🔍 Buscar", placeholder="Nome...", key="busca_v")
+        with bv2:
+            filtro_tipo_v = st.multiselect("Tipo", TIPOS, default=[], key="ft_v", placeholder="Todos")
+
+        vendidos_vis = [f for f in frotas_vendidas
+                        if (not busca_v or busca_v.lower() in f["nome"].lower())
+                        and (not filtro_tipo_v or f["tipo"] in filtro_tipo_v)]
+
+        st.markdown(f"*Exibindo {len(vendidos_vis)} de {len(frotas_vendidas)}*")
+        st.divider()
+
+        for f in sorted(vendidos_vis, key=lambda x: x.get("data_venda",""), reverse=True):
+            bg, tx = TIPO_COR.get(f["tipo"], ["#f3f4f6","#374151"])
+            with st.expander(f"🪦 {f['nome']} — vendido em {f.get('data_venda','?')}"):
+                c1,c2,c3 = st.columns(3)
+                c1.markdown(f"**Tipo:** {f['tipo']}")
+                c1.markdown(f"**Chassi:** {f.get('chassi','—')}")
+                c2.markdown(f"**Ano:** {f.get('ano','—')}")
+                c2.markdown(f"**Valor venda:** R$ {f.get('valor_venda','—')}")
+                c3.markdown(f"**Data venda:** {f.get('data_venda','—')}")
+                c3.markdown(f"**Obs:** {f.get('obs','—')}")
+                if st.button("↩️ Reativar frota", key=f"reativ_{f['id']}"):
+                    reativar_frota(f["id"])
+                    st.success("Frota reativada!"); st.rerun()
+
+# ══════════════════════════════════════════════
+# ABA 4 — EXPORTAR RELATÓRIO
+# ══════════════════════════════════════════════
+with aba_export:
+    st.subheader("📤 Exportar relatório")
+
+    ex1, ex2, ex3 = st.columns([2,1,1])
+    with ex1: mes_ref = st.text_input("Mês de referência", value=datetime.now().strftime("%B/%Y"))
+    with ex2: safra   = st.text_input("Safra", value="2025/26")
+    with ex3:
+        filtro_export_cc = st.selectbox(
+            "Filtrar por CC",
+            ["Todos os CCs"] + [c["nome"] for c in ccs],
+            help="Exporta só as frotas deste CC, ou todos")
+
+    st.markdown("**Selecione as abas a incluir:**")
+    ea, eb, ec, ed = st.columns(4)
+    inc_det  = ea.checkbox("Alocação detalhada", value=True)
+    inc_cc   = eb.checkbox("Resumo por CC",       value=True)
+    inc_fr   = ec.checkbox("Por frente",          value=True)
+    inc_vend = ed.checkbox("Vendidos/Descarte",   value=False)
+
+    if st.button("⬇️ Gerar Excel", type="primary", use_container_width=True):
+
+        # Frotas a exportar
+        frotas_exp = frotas_ativas if filtro_export_cc == "Todos os CCs" else \
+                     [f for f in frotas_ativas if f["cc_nome"] == filtro_export_cc]
+
+        wb_e = Workbook(); wb_e.remove(wb_e.active)
+
+        def hdr_s(ws, row, cols, bg, fg="FFFFFF"):
+            fill = PatternFill("solid", fgColor=bg.lstrip("#"))
+            font = Font(bold=True, color=fg, size=10)
+            aln  = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            bdr  = Border(left=Side("thin","CCCCCC"), right=Side("thin","CCCCCC"),
+                          top=Side("thin","CCCCCC"),  bottom=Side("thin","CCCCCC"))
+            for c in cols:
+                cell = ws.cell(row=row, column=c)
+                cell.fill=fill; cell.font=font; cell.alignment=aln; cell.border=bdr
+
+        def lin_s(ws, row, cols, bg="FFFFFF"):
+            fill = PatternFill("solid", fgColor=bg.lstrip("#"))
+            bdr  = Border(left=Side("thin","E5E7EB"), right=Side("thin","E5E7EB"),
+                          top=Side("thin","E5E7EB"),  bottom=Side("thin","E5E7EB"))
+            for c in cols:
+                ws.cell(row=row,column=c).fill=fill
+                ws.cell(row=row,column=c).border=bdr
+                ws.cell(row=row,column=c).font=Font(size=10)
+
+        titulo_base = f"FROTAS — {filtro_export_cc.upper() if filtro_export_cc != 'Todos os CCs' else 'TODOS OS CCs'} | {mes_ref.upper()} | SAFRA {safra}"
+
+        if inc_det:
+            ws1 = wb_e.create_sheet("Alocação Detalhada")
+            ws1.merge_cells("A1:H1"); ws1["A1"] = titulo_base
+            ws1["A1"].font=Font(bold=True,size=12,color="FFFFFF")
+            ws1["A1"].fill=PatternFill("solid",fgColor="1D9E75")
+            ws1["A1"].alignment=Alignment(horizontal="center",vertical="center")
+            ws1.row_dimensions[1].height=26
+            ws1.merge_cells("A2:H2")
+            ws1["A2"]=f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+            ws1["A2"].font=Font(italic=True,size=9,color="6B7280")
+            ws1["A2"].alignment=Alignment(horizontal="right")
+            hdrs1=["Frota","Tipo","Chassi","Ano","Centro de Custo","Frente de Corte","Observação","Situação"]
+            for ci,h in enumerate(hdrs1,1): ws1.cell(row=3,column=ci,value=h)
+            hdr_s(ws1,3,range(1,9),"0F6E56"); ws1.row_dimensions[3].height=18
+            row=4
+            for f in sorted(frotas_exp, key=lambda x:(x.get("cc_nome","zzz"),x.get("frente_nome","zzz"),x["nome"])):
+                sit="✅ Alocada" if f["cc_nome"] else "⚠️ Disponível"
+                linha=[f["nome"],f["tipo"],f.get("chassi",""),f.get("ano",""),
+                       f["cc_nome"] or "—",f["frente_nome"] or "—",f.get("obs",""),sit]
+                for ci,v in enumerate(linha,1): ws1.cell(row=row,column=ci,value=v)
+                lin_s(ws1,row,range(1,9),"F0FDF4" if f["cc_nome"] else "FFF7ED"); row+=1
+            for ci,w in zip(range(1,9),[32,14,22,8,30,24,22,14]):
+                ws1.column_dimensions[get_column_letter(ci)].width=w
+            ws1.freeze_panes="A4"
+
+        if inc_cc:
+            ws2 = wb_e.create_sheet("Resumo por CC")
+            ws2.merge_cells("A1:H1"); ws2["A1"]=f"RESUMO POR CC — {mes_ref.upper()}"
+            ws2["A1"].font=Font(bold=True,size=12,color="FFFFFF")
+            ws2["A1"].fill=PatternFill("solid",fgColor="378ADD")
+            ws2["A1"].alignment=Alignment(horizontal="center",vertical="center")
+            ws2.row_dimensions[1].height=26
+            hdrs2=["Centro de Custo","Total","Colhedoras","Transbordos","Tratores","Caminhões","Veículos","Outros"]
+            for ci,h in enumerate(hdrs2,1): ws2.cell(row=2,column=ci,value=h)
+            hdr_s(ws2,2,range(1,9),"185FA5"); r2=3
+            ccs_rel = [c for c in ccs if filtro_export_cc=="Todos os CCs" or c["nome"]==filtro_export_cc]
+            for cc in ccs_rel:
+                fc=[f for f in frotas_ativas if f["cc_nome"]==cc["nome"]]
+                linha2=[cc["nome"],len(fc),
+                        sum(1 for f in fc if f["tipo"]=="Colhedora"),
+                        sum(1 for f in fc if f["tipo"]=="Transbordo"),
+                        sum(1 for f in fc if f["tipo"]=="Trator"),
+                        sum(1 for f in fc if f["tipo"]=="Caminhão"),
+                        sum(1 for f in fc if f["tipo"]=="Veículo"),
+                        sum(1 for f in fc if f["tipo"] in("Implemento","Apoio","Outro"))]
+                for ci,v in enumerate(linha2,1): ws2.cell(row=r2,column=ci,value=v)
+                lin_s(ws2,r2,range(1,9),"EFF6FF" if r2%2==0 else "FFFFFF"); r2+=1
+            ws2.cell(r2,1,"TOTAL")
+            for ci in range(2,9): ws2.cell(r2,ci,f"=SUM({get_column_letter(ci)}3:{get_column_letter(ci)}{r2-1})")
+            hdr_s(ws2,r2,range(1,9),"1D9E75")
+            for ci,w in zip(range(1,9),[34,8,12,12,10,12,10,10]):
+                ws2.column_dimensions[get_column_letter(ci)].width=w
+
+        if inc_fr:
+            ws3 = wb_e.create_sheet("Por Frente")
+            ws3.merge_cells("A1:G1"); ws3["A1"]=f"POR FRENTE — {mes_ref.upper()}"
+            ws3["A1"].font=Font(bold=True,size=12,color="FFFFFF")
+            ws3["A1"].fill=PatternFill("solid",fgColor="BA7517")
+            ws3["A1"].alignment=Alignment(horizontal="center",vertical="center")
+            ws3.row_dimensions[1].height=26
+            hdrs3=["Frente","Centro de Custo","Frota","Tipo","Chassi","Ano","Observação"]
+            for ci,h in enumerate(hdrs3,1): ws3.cell(row=2,column=ci,value=h)
+            hdr_s(ws3,2,range(1,8),"854F0B"); r3=3
+            for fr in frentes:
+                ff=[f for f in frotas_exp if f["frente_nome"]==fr["nome"]]
+                for f in sorted(ff,key=lambda x:x["nome"]):
+                    linha3=[fr["nome"],f["cc_nome"] or "—",f["nome"],f["tipo"],
+                            f.get("chassi",""),f.get("ano",""),f.get("obs","")]
+                    for ci,v in enumerate(linha3,1): ws3.cell(row=r3,column=ci,value=v)
+                    lin_s(ws3,r3,range(1,8),"FFFBEB" if r3%2==0 else "FFFFFF"); r3+=1
+            for ci,w in zip(range(1,8),[24,30,34,14,22,8,22]):
+                ws3.column_dimensions[get_column_letter(ci)].width=w
+
+        if inc_vend:
+            ws4 = wb_e.create_sheet("Vendidos-Descarte")
+            ws4.merge_cells("A1:G1"); ws4["A1"]="FROTAS VENDIDAS / DESCARTE"
+            ws4["A1"].font=Font(bold=True,size=12,color="FFFFFF")
+            ws4["A1"].fill=PatternFill("solid",fgColor="A32D2D")
+            ws4["A1"].alignment=Alignment(horizontal="center",vertical="center")
+            ws4.row_dimensions[1].height=26
+            hdrs4=["Frota","Tipo","Chassi","Ano","Data Venda","Valor Venda (R$)","Observação"]
+            for ci,h in enumerate(hdrs4,1): ws4.cell(row=2,column=ci,value=h)
+            hdr_s(ws4,2,range(1,8),"791F1F"); r4=3
+            for f in sorted(frotas_vendidas, key=lambda x:x.get("data_venda",""), reverse=True):
+                linha4=[f["nome"],f["tipo"],f.get("chassi",""),f.get("ano",""),
+                        f.get("data_venda",""),f.get("valor_venda",""),f.get("obs","")]
+                for ci,v in enumerate(linha4,1): ws4.cell(row=r4,column=ci,value=v)
+                lin_s(ws4,r4,range(1,8),"FEF2F2" if r4%2==0 else "FFFFFF"); r4+=1
+            for ci,w in zip(range(1,8),[32,14,22,8,14,16,24]):
+                ws4.column_dimensions[get_column_letter(ci)].width=w
+
+        buf=io.BytesIO(); wb_e.save(buf); buf.seek(0)
+        cc_slug = filtro_export_cc.replace(" ","_").replace("/","-") if filtro_export_cc!="Todos os CCs" else "todos"
+        nome_arq=f"frotas_{cc_slug}_{datetime.now().strftime('%Y%m_%B').lower()}.xlsx"
+        st.download_button("📥 Baixar Excel", buf, nome_arq,
+                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           use_container_width=True, type="primary")
+        n_abas = sum([inc_det,inc_cc,inc_fr,inc_vend])
+        st.success(f"Relatório gerado com {n_abas} aba(s) — {len(frotas_exp)} frotas.")
