@@ -20,6 +20,7 @@ SITE_NAME     = st.secrets.get("SITE_NAME", "AppKanbanFrotas")
 LISTA_CC      = st.secrets.get("LISTA_CC",      "KanbanCC")
 LISTA_FRENTES = st.secrets.get("LISTA_FRENTES", "KanbanFrentes")
 LISTA_FROTAS  = st.secrets.get("LISTA_FROTAS",  "KanbanFrotas")
+LISTA_ENTREGA = st.secrets.get("LISTA_ENTREGA_FUTURA", "KanbanEntregaFutura")
 
 TIPOS = ["Colhedora","Transbordo","Trator","Caminhão","Veículo","Implemento","Apoio","Outro"]
 TIPO_EMOJI = {"Colhedora":"🌾","Transbordo":"🚛","Trator":"🚜","Caminhão":"🚚",
@@ -113,8 +114,28 @@ def carregar_dados():
 
     return ccs, frentes, frotas
 
+@st.cache_data(ttl=30)
+def carregar_entregas():
+    entregas_raw = lista_items(LISTA_ENTREGA)
+    return [{
+        "id":            item["id"],
+        "nome":          item["fields"].get("Title",""),
+        "frota_id":      item["fields"].get("FrotaItemId",""),
+        "chassi":        item["fields"].get("Chassi",""),
+        "tipo":          item["fields"].get("Tipo",""),
+        "cc_origem":     item["fields"].get("CCOrigem",""),
+        "frente_origem": item["fields"].get("FrenteOrigem",""),
+        "motivo":        item["fields"].get("Motivo",""),
+        "destino":       item["fields"].get("Destino",""),
+        "status":        item["fields"].get("Status","Pendente"),
+        "data_cadastro": item["fields"].get("DataCadastro",""),
+        "data_entrega":  item["fields"].get("DataEntrega",""),
+        "obs_baixa":     item["fields"].get("ObsBaixa",""),
+    } for item in entregas_raw]
+
 def invalidar():
     carregar_dados.clear()
+    carregar_entregas.clear()
 
 # ─────────────────────────────────────────────
 # AÇÕES
@@ -141,11 +162,42 @@ def reativar_frota(frota_id):
     })
     invalidar()
 
+def registrar_entrega_futura(frota, motivo, destino):
+    """Cria um registro de 'entrega futura' vinculado a uma frota existente.
+    Não altera CCNome/FrenteNome da frota — é só um aviso à parte."""
+    criar_item(LISTA_ENTREGA, {
+        "Title":        frota["nome"],
+        "FrotaItemId":  frota["id"],
+        "Chassi":       frota.get("chassi",""),
+        "Tipo":         frota.get("tipo",""),
+        "CCOrigem":     frota.get("cc_nome",""),
+        "FrenteOrigem": frota.get("frente_nome",""),
+        "Motivo":       motivo,
+        "Destino":      destino,
+        "Status":       "Pendente",
+        "DataCadastro": datetime.today().strftime("%Y-%m-%d"),
+        "DataEntrega":  "",
+        "ObsBaixa":     "",
+    })
+    invalidar()
+
+def marcar_entrega_concluida(entrega_id, data_entrega, obs_baixa):
+    patch_item(LISTA_ENTREGA, entrega_id, {
+        "Status": "Entregue", "DataEntrega": data_entrega, "ObsBaixa": obs_baixa,
+    })
+    invalidar()
+
+def cancelar_entrega_futura(entrega_id):
+    """Remove um aviso de entrega futura cadastrado por engano."""
+    patch_item(LISTA_ENTREGA, entrega_id, {"Status": "Cancelado"})
+    invalidar()
+
 # ─────────────────────────────────────────────
 # CARREGAR
 # ─────────────────────────────────────────────
 try:
     ccs, frentes, frotas = carregar_dados()
+    entregas = carregar_entregas()
 except Exception as e:
     st.error(f"Erro ao conectar ao SharePoint: {e}")
     st.stop()
@@ -153,6 +205,11 @@ except Exception as e:
 # Separa ativos e vendidos
 frotas_ativas  = [f for f in frotas if f.get("status","Ativo") != "Vendido"]
 frotas_vendidas = [f for f in frotas if f.get("status","Ativo") == "Vendido"]
+
+# Separa entregas futuras pendentes e concluídas
+entregas_pendentes = [e for e in entregas if e.get("status","Pendente") == "Pendente"]
+entregas_concluidas = [e for e in entregas if e.get("status") == "Entregue"]
+ids_frota_com_entrega_pendente = {e["frota_id"] for e in entregas_pendentes if e.get("frota_id")}
 
 # ─────────────────────────────────────────────
 # PROCESSAR AÇÕES (query params)
@@ -191,9 +248,10 @@ st.markdown("""
 # ABAS PRINCIPAIS
 # ─────────────────────────────────────────────
 st.markdown("### 🌾 Kanban Frotas — Teston / Metalcana")
-aba_board, aba_nova, aba_vendidos, aba_export = st.tabs([
+aba_board, aba_nova, aba_entrega, aba_vendidos, aba_export = st.tabs([
     "🗂️ Board Kanban",
     "➕ Nova Frota",
+    f"🚚 Entrega Futura ({len(entregas_pendentes)})",
     "📋 Histórico de Baixas",
     "📤 Exportar Relatório",
 ])
@@ -600,7 +658,139 @@ with aba_nova:
                 f'</div>', unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════
-# ABA 3 — FROTAS VENDIDAS / DESCARTE
+# ABA 3 — ENTREGA FUTURA
+# ══════════════════════════════════════════════
+# Módulo à parte: registra frotas que HOJE estão alocadas em algum CC/frente
+# mas que no futuro serão entregues/devolvidas (fim de contrato de aluguel,
+# negociação de compra, liberação após operação, etc.). É só um aviso —
+# nunca mexe no CCNome/FrenteNome da frota no board principal.
+with aba_entrega:
+    st.subheader("🚚 Entrega Futura")
+    st.caption("Aviso de equipamentos que estão alocados hoje, mas que serão "
+               "entregues/devolvidos futuramente. Não altera a posição da frota no board.")
+
+    sub_pend, sub_hist = st.tabs([
+        f"📋 Pendentes ({len(entregas_pendentes)})",
+        f"✅ Histórico de entregas ({len(entregas_concluidas)})",
+    ])
+
+    # ── PENDENTES ──────────────────────────────
+    with sub_pend:
+        with st.expander("➕ Registrar nova entrega futura", expanded=len(entregas_pendentes) == 0):
+            with st.form("form_entrega_futura", clear_on_submit=True):
+                # Só oferece frotas que ainda não têm entrega pendente cadastrada
+                frotas_elegiveis = sorted(
+                    [f for f in frotas_ativas if f["id"] not in ids_frota_com_entrega_pendente],
+                    key=lambda x: x["nome"])
+                opcoes = [f'{f["nome"]}  ·  {f["cc_nome"] or "sem alocação"}' for f in frotas_elegiveis]
+
+                if not frotas_elegiveis:
+                    st.info("Todas as frotas ativas já têm uma entrega futura pendente cadastrada.")
+                    sel_idx = None
+                else:
+                    sel_label = st.selectbox("Frota *", opcoes,
+                        help="Busque pelo nome/número — os dados (tipo, chassi, CC/frente atuais) são puxados automaticamente")
+                    sel_idx = opcoes.index(sel_label) if sel_label else None
+
+                ce1, ce2 = st.columns(2)
+                with ce1:
+                    ne_motivo = st.text_area("Motivo / condição da entrega *",
+                        placeholder="Ex: Contrato de aluguel encerra em dez/2026, será devolvida à New Agro")
+                with ce2:
+                    ne_destino = st.text_input("Destino",
+                        placeholder="Ex: New Agro, devolução ao proprietário...")
+
+                submitted_e = st.form_submit_button("💾 Registrar", type="primary", use_container_width=True)
+
+            if submitted_e:
+                if sel_idx is None:
+                    st.error("Selecione uma frota.")
+                elif not ne_motivo.strip():
+                    st.error("Motivo é obrigatório.")
+                else:
+                    frota_sel = frotas_elegiveis[sel_idx]
+                    try:
+                        registrar_entrega_futura(frota_sel, ne_motivo.strip(), ne_destino.strip())
+                        st.success(f"✅ Entrega futura registrada para '{frota_sel['nome']}'!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Erro ao registrar: {e}")
+
+        st.divider()
+
+        if not entregas_pendentes:
+            st.info("Nenhuma entrega futura pendente no momento.")
+        else:
+            # Mapa rápido para achar a alocação ATUAL da frota (pode ter mudado
+            # desde o cadastro, já que o board segue independente)
+            frotas_por_id = {f["id"]: f for f in frotas_ativas}
+
+            busca_e = st.text_input("🔍 Buscar", placeholder="Nome...", key="busca_e")
+            pend_vis = [e for e in entregas_pendentes
+                        if not busca_e or busca_e.lower() in e["nome"].lower()]
+            st.markdown(f"*Exibindo {len(pend_vis)} de {len(entregas_pendentes)}*")
+
+            for e in sorted(pend_vis, key=lambda x: x["nome"]):
+                frota_atual = frotas_por_id.get(e["frota_id"])
+                cc_atual = frota_atual["cc_nome"] if frota_atual else e.get("cc_origem", "—")
+                fr_atual = frota_atual["frente_nome"] if frota_atual else e.get("frente_origem", "")
+                mudou = frota_atual and frota_atual["cc_nome"] != e.get("cc_origem", "")
+
+                with st.container(border=True):
+                    c1, c2 = st.columns([3, 1])
+                    with c1:
+                        st.markdown(f"**🚚 {e['nome']}**  ·  {e.get('tipo','—')}")
+                        st.caption(f"Chassi: {e.get('chassi','—')}  |  Cadastrado em: {e.get('data_cadastro','—')}")
+                        st.markdown(f"📍 CC atual: **{cc_atual or 'sem alocação'}**"
+                                    + (f" · ⚡ {fr_atual}" if fr_atual else "")
+                                    + (" ⚠️ *(mudou desde o cadastro)*" if mudou else ""))
+                        st.markdown(f"**Motivo:** {e.get('motivo','—')}")
+                        if e.get("destino"):
+                            st.markdown(f"**Destino:** {e['destino']}")
+                    with c2:
+                        if st.button("✅ Marcar entregue", key=f"entregar_{e['id']}", use_container_width=True):
+                            st.session_state["baixa_entrega_id"] = e["id"]
+                        if st.button("🗑️ Cancelar registro", key=f"cancelar_{e['id']}", use_container_width=True):
+                            cancelar_entrega_futura(e["id"])
+                            st.rerun()
+
+                    if st.session_state.get("baixa_entrega_id") == e["id"]:
+                        with st.form(f"form_baixa_{e['id']}"):
+                            st.markdown(f"**Confirmar entrega de {e['nome']}**")
+                            bd1, bd2 = st.columns(2)
+                            with bd1:
+                                data_ent = st.date_input("Data da entrega", value=datetime.today())
+                            with bd2:
+                                obs_ent = st.text_input("Observação", placeholder="Opcional")
+                            bc1, bc2 = st.columns(2)
+                            with bc1:
+                                if st.form_submit_button("✅ Confirmar", type="primary", use_container_width=True):
+                                    marcar_entrega_concluida(e["id"], str(data_ent), obs_ent)
+                                    del st.session_state["baixa_entrega_id"]
+                                    st.success("Entrega confirmada!")
+                                    st.rerun()
+                            with bc2:
+                                if st.form_submit_button("Cancelar", use_container_width=True):
+                                    del st.session_state["baixa_entrega_id"]
+                                    st.rerun()
+
+    # ── HISTÓRICO ──────────────────────────────
+    with sub_hist:
+        if not entregas_concluidas:
+            st.info("Nenhuma entrega concluída ainda.")
+        else:
+            for e in sorted(entregas_concluidas, key=lambda x: x.get("data_entrega",""), reverse=True):
+                with st.expander(f"✅ {e['nome']} — entregue em {e.get('data_entrega','?')}"):
+                    c1, c2 = st.columns(2)
+                    c1.markdown(f"**Tipo:** {e.get('tipo','—')}")
+                    c1.markdown(f"**Chassi:** {e.get('chassi','—')}")
+                    c1.markdown(f"**CC de origem:** {e.get('cc_origem','—')}")
+                    c2.markdown(f"**Motivo:** {e.get('motivo','—')}")
+                    c2.markdown(f"**Destino:** {e.get('destino','—')}")
+                    c2.markdown(f"**Obs. da baixa:** {e.get('obs_baixa','—')}")
+
+# ══════════════════════════════════════════════
+# ABA 4 — FROTAS VENDIDAS / DESCARTE
 # ══════════════════════════════════════════════
 with aba_vendidos:
     st.subheader(f"📋 Histórico de Baixas — {len(frotas_vendidas)} equipamentos")
@@ -638,7 +828,7 @@ with aba_vendidos:
                     st.success("Frota reativada!"); st.rerun()
 
 # ══════════════════════════════════════════════
-# ABA 4 — EXPORTAR RELATÓRIO
+# ABA 5 — EXPORTAR RELATÓRIO
 # ══════════════════════════════════════════════
 with aba_export:
     st.subheader("📤 Exportar relatório")
