@@ -1,6 +1,6 @@
 import streamlit as st
 import streamlit.components.v1 as components
-import requests, json, time
+import requests, json, time, hashlib
 from datetime import datetime
 import io
 from openpyxl import Workbook
@@ -10,6 +10,55 @@ from openpyxl.utils import get_column_letter
 # ─────────────────────────────────────────────
 st.set_page_config(page_title="Kanban Frotas", page_icon="🌾",
                    layout="wide", initial_sidebar_state="collapsed")
+
+# ─────────────────────────────────────────────
+# LOGIN (2 perfis: admin / visualizador)
+# ─────────────────────────────────────────────
+# Usuários ficam nos secrets, em [usuarios], como:
+#   [usuarios.joao]
+#   senha_sha256 = "..."   # gerado com gerar_senha.py
+#   perfil = "admin"       # ou "visualizador"
+USUARIOS = st.secrets.get("usuarios", {})
+
+def _hash(senha: str) -> str:
+    return hashlib.sha256(senha.encode("utf-8")).hexdigest()
+
+def _autenticar(usuario: str, senha: str):
+    u = USUARIOS.get(usuario)
+    if not u:
+        return None
+    if _hash(senha) != u.get("senha_sha256", ""):
+        return None
+    return u.get("perfil", "visualizador")
+
+if "auth_usuario" not in st.session_state:
+    st.session_state["auth_usuario"] = None
+    st.session_state["auth_perfil"] = None
+
+if not st.session_state["auth_usuario"]:
+    st.markdown("### 🌾 Kanban Frotas — Teston / Metalcana")
+    st.caption("Faça login para continuar.")
+    _c1, _c2, _c3 = st.columns([1, 1, 1])
+    with _c2:
+        with st.form("form_login"):
+            _login_user = st.text_input("Usuário")
+            _login_pass = st.text_input("Senha", type="password")
+            _login_btn  = st.form_submit_button("Entrar", type="primary", use_container_width=True)
+        if _login_btn:
+            if not USUARIOS:
+                st.error("Nenhum usuário configurado em st.secrets['usuarios']. Avise o admin.")
+            else:
+                _perfil = _autenticar(_login_user.strip(), _login_pass)
+                if _perfil:
+                    st.session_state["auth_usuario"] = _login_user.strip()
+                    st.session_state["auth_perfil"]  = _perfil
+                    st.rerun()
+                else:
+                    st.error("Usuário ou senha incorretos.")
+    st.stop()
+
+PERFIL = st.session_state["auth_perfil"]
+PODE_EDITAR = PERFIL == "admin"
 
 # ── CONFIGURAÇÃO ─────────────────────────────
 TENANT_ID     = st.secrets["TENANT_ID"]
@@ -220,12 +269,16 @@ frota_id = params.get("frota_id","")
 valor    = params.get("valor","")
 
 if acao == "mover_cc" and frota_id and valor is not None:
+    if not PODE_EDITAR:
+        st.query_params.clear(); st.rerun()
     try:
         mover_cc(frota_id, valor)
         st.query_params.clear(); st.rerun()
     except Exception as e:
         st.error(f"Erro ao mover: {e}")
 elif acao == "mover_frente" and frota_id:
+    if not PODE_EDITAR:
+        st.query_params.clear(); st.rerun()
     try:
         mover_frente(frota_id, valor if valor != "__sem__" else "")
         st.query_params.clear(); st.rerun()
@@ -248,6 +301,15 @@ st.markdown("""
 # ABAS PRINCIPAIS
 # ─────────────────────────────────────────────
 st.markdown("### 🌾 Kanban Frotas — Teston / Metalcana")
+_hc1, _hc2 = st.columns([5, 1])
+with _hc1:
+    _badge = "🔑 admin" if PODE_EDITAR else "👁️ visualizador"
+    st.caption(f"Usuário: **{st.session_state['auth_usuario']}** · Perfil: {_badge}")
+with _hc2:
+    if st.button("Sair", use_container_width=True):
+        st.session_state["auth_usuario"] = None
+        st.session_state["auth_perfil"] = None
+        st.rerun()
 aba_board, aba_nova, aba_entrega, aba_vendidos, aba_export = st.tabs([
     "🗂️ Board Kanban",
     "➕ Nova Frota",
@@ -338,6 +400,7 @@ with aba_board:
     }
 
     board_data = {
+        "pode_editar": PODE_EDITAR,
         "ccs": [{
             "nome":     c["nome"],
             "cor":      CORES_CC[i % len(CORES_CC)],
@@ -403,6 +466,7 @@ body{{background:transparent;overflow-x:auto;}}
 .cards-list{{min-height:60px;padding:8px;display:flex;flex-direction:column;gap:6px;transition:background .15s;}}
 .cards-list.drag-over{{background:#e0f2fe;border-radius:0 0 8px 8px;}}
 .card{{background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px;cursor:grab;user-select:none;border-left:4px solid #1D9E75;transition:box-shadow .15s,transform .1s,opacity .15s;}}
+.card.somente-leitura{{cursor:default;}}
 .card:hover{{box-shadow:0 2px 8px rgba(0,0,0,.10);}}
 .card:active{{cursor:grabbing;transform:scale(.97);}}
 .card.dragging{{opacity:.35;}}
@@ -446,6 +510,7 @@ body{{background:transparent;overflow-x:auto;}}
 const DATA = {board_json};
 const nomesCc = DATA.nomes_cc;
 const nomesFr = DATA.nomes_fr;
+const PODE_EDITAR = DATA.pode_editar;
 let dragFrotaId=null,dragFrotaNome=null,dragEl=null,ghostEl=null,modalFrotaId=null;
 
 function render(){{
@@ -480,17 +545,20 @@ function criarCard(frota,corCC,temDest){{
   const el=document.createElement('div');
   let cls='card';
   if(temDest) cls+=frota.destacado?' destacado':' nao-destacado';
+  if(!PODE_EDITAR) cls+=' somente-leitura';
   el.className=cls;
   el.dataset.id=frota.id;
   el.style.borderLeftColor=corCC;
   const sub=[frota.chassi,frota.ano].filter(Boolean).join(' | ');
   const frLabel=frota.frente||'+ frente';
+  const frenteAttr=PODE_EDITAR?`onclick="abrirModal(event,'${{frota.id}}','${{frota.nome.replace(/'/g,"\\'")}}','${{(frota.frente||'').replace(/'/g,"\\'")}}')"`:'';
   el.innerHTML=`
     <div class="card-name">${{frota.emoji}} ${{frota.nome}}</div>
     ${{sub?`<div class="card-sub">${{sub}}</div>`:''}}
     <span class="card-tag" style="background:${{frota.cor_bg}};color:${{frota.cor_tx}}">${{frota.tipo}}</span>
-    <div class="card-frente" onclick="abrirModal(event,'${{frota.id}}','${{frota.nome.replace(/'/g,"\\'")}}','${{(frota.frente||'').replace(/'/g,"\\'")}}')" >⚡ ${{frLabel}}</div>`;
-  el.draggable=true;
+    <div class="card-frente" ${{frenteAttr}} style="${{PODE_EDITAR?'':'cursor:default;opacity:.7'}}">⚡ ${{frLabel}}</div>`;
+  el.draggable=PODE_EDITAR;
+  if(!PODE_EDITAR){{ el.style.cursor='default'; return el; }}
   el.addEventListener('dragstart',e=>{{
     dragFrotaId=frota.id;dragEl=el;
     setTimeout(()=>el.classList.add('dragging'),0);
@@ -511,6 +579,7 @@ function criarCard(frota,corCC,temDest){{
 }}
 
 function setupDrop(listEl,ccNome){{
+  if(!PODE_EDITAR) return;
   listEl.addEventListener('dragover',e=>{{e.preventDefault();listEl.classList.add('drag-over');}});
   listEl.addEventListener('dragleave',e=>{{if(!listEl.contains(e.relatedTarget))listEl.classList.remove('drag-over');}});
   listEl.addEventListener('drop',e=>{{
@@ -576,7 +645,7 @@ render();
     components.html(BOARD_HTML, height=680, scrolling=True)
 
     # ── Modal vender (via Streamlit) ──────────
-    if acao == "vender" and frota_id:
+    if acao == "vender" and frota_id and PODE_EDITAR:
         frota_obj = next((f for f in frotas_ativas if f["id"] == frota_id), None)
         if frota_obj:
             with st.form("form_venda"):
@@ -598,49 +667,52 @@ render();
 # ══════════════════════════════════════════════
 with aba_nova:
     st.subheader("➕ Cadastrar nova frota")
-    st.caption("Preencha os dados do novo equipamento adquirido.")
+    if not PODE_EDITAR:
+        st.info("👁️ Seu perfil é somente visualização — apenas administradores podem cadastrar frotas.")
+    else:
+        st.caption("Preencha os dados do novo equipamento adquirido.")
 
-    with st.form("form_nova_frota", clear_on_submit=True):
-        c1, c2 = st.columns(2)
-        with c1:
-            nn = st.text_input("Nome / Identificação *", placeholder="1600 - TRATOR NEW HOLLAND T7.245")
-            nt = st.selectbox("Tipo *", TIPOS)
-            nm = st.text_input("Modelo", placeholder="New Holland T7.245")
-        with c2:
-            nch = st.text_input("Chassi", placeholder="HCCZ7245XXXX")
-            nan = st.text_input("Ano", placeholder="2026")
-            nobs = st.text_input("Observação", placeholder="Notas sobre o equipamento")
+        with st.form("form_nova_frota", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                nn = st.text_input("Nome / Identificação *", placeholder="1600 - TRATOR NEW HOLLAND T7.245")
+                nt = st.selectbox("Tipo *", TIPOS)
+                nm = st.text_input("Modelo", placeholder="New Holland T7.245")
+            with c2:
+                nch = st.text_input("Chassi", placeholder="HCCZ7245XXXX")
+                nan = st.text_input("Ano", placeholder="2026")
+                nobs = st.text_input("Observação", placeholder="Notas sobre o equipamento")
 
-        st.divider()
-        st.markdown("**Alocação inicial (opcional)**")
-        ca1, ca2 = st.columns(2)
-        with ca1:
-            ncc_opc = ["— Sem alocação (disponível) —"] + [c["nome"] for c in ccs]
-            ncc = st.selectbox("Centro de Custo", ncc_opc)
-        with ca2:
-            nfr_opc = ["— Sem frente —"] + [fr["nome"] for fr in frentes]
-            nfr = st.selectbox("Frente de Corte", nfr_opc)
+            st.divider()
+            st.markdown("**Alocação inicial (opcional)**")
+            ca1, ca2 = st.columns(2)
+            with ca1:
+                ncc_opc = ["— Sem alocação (disponível) —"] + [c["nome"] for c in ccs]
+                ncc = st.selectbox("Centro de Custo", ncc_opc)
+            with ca2:
+                nfr_opc = ["— Sem frente —"] + [fr["nome"] for fr in frentes]
+                nfr = st.selectbox("Frente de Corte", nfr_opc)
 
-        submitted = st.form_submit_button("💾 Cadastrar frota", type="primary", use_container_width=True)
+            submitted = st.form_submit_button("💾 Cadastrar frota", type="primary", use_container_width=True)
 
-    if submitted:
-        if not nn.strip():
-            st.error("Nome é obrigatório.")
-        else:
-            cc_val = "" if ncc == "— Sem alocação (disponível) —" else ncc
-            fr_val = "" if nfr == "— Sem frente —" else nfr
-            try:
-                criar_item(LISTA_FROTAS, {
-                    "Title": nn.strip(), "Tipo": nt, "Chassi": nch.strip(),
-                    "Ano": nan.strip(), "Obs": nobs.strip(),
-                    "CCNome": cc_val, "FrenteNome": fr_val,
-                    "Status": "Ativo", "DataVenda": "", "ValorVenda": "",
-                })
-                invalidar()
-                st.success(f"✅ Frota '{nn}' cadastrada com sucesso!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Erro ao cadastrar: {e}")
+        if submitted:
+            if not nn.strip():
+                st.error("Nome é obrigatório.")
+            else:
+                cc_val = "" if ncc == "— Sem alocação (disponível) —" else ncc
+                fr_val = "" if nfr == "— Sem frente —" else nfr
+                try:
+                    criar_item(LISTA_FROTAS, {
+                        "Title": nn.strip(), "Tipo": nt, "Chassi": nch.strip(),
+                        "Ano": nan.strip(), "Obs": nobs.strip(),
+                        "CCNome": cc_val, "FrenteNome": fr_val,
+                        "Status": "Ativo", "DataVenda": "", "ValorVenda": "",
+                    })
+                    invalidar()
+                    st.success(f"✅ Frota '{nn}' cadastrada com sucesso!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao cadastrar: {e}")
 
     # Lista de frotas disponíveis (sem CC)
     disponiveis = [f for f in frotas_ativas if not f["cc_nome"]]
@@ -676,45 +748,46 @@ with aba_entrega:
 
     # ── PENDENTES ──────────────────────────────
     with sub_pend:
-        with st.expander("➕ Registrar nova entrega futura", expanded=len(entregas_pendentes) == 0):
-            with st.form("form_entrega_futura", clear_on_submit=True):
-                # Só oferece frotas que ainda não têm entrega pendente cadastrada
-                frotas_elegiveis = sorted(
-                    [f for f in frotas_ativas if f["id"] not in ids_frota_com_entrega_pendente],
-                    key=lambda x: x["nome"])
-                opcoes = [f'{f["nome"]}  ·  {f["cc_nome"] or "sem alocação"}' for f in frotas_elegiveis]
+        if PODE_EDITAR:
+            with st.expander("➕ Registrar nova entrega futura", expanded=len(entregas_pendentes) == 0):
+                with st.form("form_entrega_futura", clear_on_submit=True):
+                    # Só oferece frotas que ainda não têm entrega pendente cadastrada
+                    frotas_elegiveis = sorted(
+                        [f for f in frotas_ativas if f["id"] not in ids_frota_com_entrega_pendente],
+                        key=lambda x: x["nome"])
+                    opcoes = [f'{f["nome"]}  ·  {f["cc_nome"] or "sem alocação"}' for f in frotas_elegiveis]
 
-                if not frotas_elegiveis:
-                    st.info("Todas as frotas ativas já têm uma entrega futura pendente cadastrada.")
-                    sel_idx = None
-                else:
-                    sel_label = st.selectbox("Frota *", opcoes,
-                        help="Busque pelo nome/número — os dados (tipo, chassi, CC/frente atuais) são puxados automaticamente")
-                    sel_idx = opcoes.index(sel_label) if sel_label else None
+                    if not frotas_elegiveis:
+                        st.info("Todas as frotas ativas já têm uma entrega futura pendente cadastrada.")
+                        sel_idx = None
+                    else:
+                        sel_label = st.selectbox("Frota *", opcoes,
+                            help="Busque pelo nome/número — os dados (tipo, chassi, CC/frente atuais) são puxados automaticamente")
+                        sel_idx = opcoes.index(sel_label) if sel_label else None
 
-                ce1, ce2 = st.columns(2)
-                with ce1:
-                    ne_motivo = st.text_area("Motivo / condição da entrega *",
-                        placeholder="Ex: Contrato de aluguel encerra em dez/2026, será devolvida à New Agro")
-                with ce2:
-                    ne_destino = st.text_input("Destino",
-                        placeholder="Ex: New Agro, devolução ao proprietário...")
+                    ce1, ce2 = st.columns(2)
+                    with ce1:
+                        ne_motivo = st.text_area("Motivo / condição da entrega *",
+                            placeholder="Ex: Contrato de aluguel encerra em dez/2026, será devolvida à New Agro")
+                    with ce2:
+                        ne_destino = st.text_input("Destino",
+                            placeholder="Ex: New Agro, devolução ao proprietário...")
 
-                submitted_e = st.form_submit_button("💾 Registrar", type="primary", use_container_width=True)
+                    submitted_e = st.form_submit_button("💾 Registrar", type="primary", use_container_width=True)
 
-            if submitted_e:
-                if sel_idx is None:
-                    st.error("Selecione uma frota.")
-                elif not ne_motivo.strip():
-                    st.error("Motivo é obrigatório.")
-                else:
-                    frota_sel = frotas_elegiveis[sel_idx]
-                    try:
-                        registrar_entrega_futura(frota_sel, ne_motivo.strip(), ne_destino.strip())
-                        st.success(f"✅ Entrega futura registrada para '{frota_sel['nome']}'!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Erro ao registrar: {e}")
+                if submitted_e:
+                    if sel_idx is None:
+                        st.error("Selecione uma frota.")
+                    elif not ne_motivo.strip():
+                        st.error("Motivo é obrigatório.")
+                    else:
+                        frota_sel = frotas_elegiveis[sel_idx]
+                        try:
+                            registrar_entrega_futura(frota_sel, ne_motivo.strip(), ne_destino.strip())
+                            st.success(f"✅ Entrega futura registrada para '{frota_sel['nome']}'!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Erro ao registrar: {e}")
 
         st.divider()
 
@@ -748,13 +821,14 @@ with aba_entrega:
                         if e.get("destino"):
                             st.markdown(f"**Destino:** {e['destino']}")
                     with c2:
-                        if st.button("✅ Marcar entregue", key=f"entregar_{e['id']}", use_container_width=True):
-                            st.session_state["baixa_entrega_id"] = e["id"]
-                        if st.button("🗑️ Cancelar registro", key=f"cancelar_{e['id']}", use_container_width=True):
-                            cancelar_entrega_futura(e["id"])
-                            st.rerun()
+                        if PODE_EDITAR:
+                            if st.button("✅ Marcar entregue", key=f"entregar_{e['id']}", use_container_width=True):
+                                st.session_state["baixa_entrega_id"] = e["id"]
+                            if st.button("🗑️ Cancelar registro", key=f"cancelar_{e['id']}", use_container_width=True):
+                                cancelar_entrega_futura(e["id"])
+                                st.rerun()
 
-                    if st.session_state.get("baixa_entrega_id") == e["id"]:
+                    if PODE_EDITAR and st.session_state.get("baixa_entrega_id") == e["id"]:
                         with st.form(f"form_baixa_{e['id']}"):
                             st.markdown(f"**Confirmar entrega de {e['nome']}**")
                             bd1, bd2 = st.columns(2)
@@ -823,7 +897,7 @@ with aba_vendidos:
                 c2.markdown(f"**Valor venda:** R$ {f.get('valor_venda','—')}")
                 c3.markdown(f"**Data venda:** {f.get('data_venda','—')}")
                 c3.markdown(f"**Obs:** {f.get('obs','—')}")
-                if st.button("↩️ Reativar frota", key=f"reativ_{f['id']}"):
+                if PODE_EDITAR and st.button("↩️ Reativar frota", key=f"reativ_{f['id']}"):
                     reativar_frota(f["id"])
                     st.success("Frota reativada!"); st.rerun()
 
