@@ -8,7 +8,7 @@ from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 # ─────────────────────────────────────────────
-st.set_page_config(page_title="Kanban Frotas", page_icon="🌾",
+st.set_page_config(page_title="Controle Frotas", page_icon="🌾",
                    layout="wide", initial_sidebar_state="collapsed")
 
 # ─────────────────────────────────────────────
@@ -36,7 +36,7 @@ if "auth_usuario" not in st.session_state:
     st.session_state["auth_perfil"] = None
 
 if not st.session_state["auth_usuario"]:
-    st.markdown("### 🌾 Kanban Frotas — Teston / Metalcana")
+    st.markdown("### 🌾 Controle Frotas — Teston / Metalcana")
     st.caption("Faça login para continuar.")
     _c1, _c2, _c3 = st.columns([1, 1, 1])
     with _c2:
@@ -300,7 +300,7 @@ st.markdown("""
 # ─────────────────────────────────────────────
 # ABAS PRINCIPAIS
 # ─────────────────────────────────────────────
-st.markdown("### 🌾 Kanban Frotas — Teston / Metalcana")
+st.markdown("### 🌾 Controle Frotas — Teston / Metalcana")
 _hc1, _hc2 = st.columns([5, 1])
 with _hc1:
     _badge = "🔑 admin" if PODE_EDITAR else "👁️ visualizador"
@@ -311,7 +311,7 @@ with _hc2:
         st.session_state["auth_perfil"] = None
         st.rerun()
 aba_board, aba_nova, aba_entrega, aba_vendidos, aba_export = st.tabs([
-    "🗂️ Board Kanban",
+    "🗂️ Board Controle",
     "➕ Nova Frota",
     f"🚚 Entrega Futura ({len(entregas_pendentes)})",
     "📋 Histórico de Baixas",
