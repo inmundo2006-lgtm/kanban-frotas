@@ -231,11 +231,12 @@ document.getElementById('modalBg').addEventListener('click',e=>{if(e.target===do
 
 // Rodinha do mouse sobre o quadro rola na HORIZONTAL (para ver as outras colunas),
 // exceto quando o cursor está sobre os cards de uma coluna com rolagem vertical.
-document.body.addEventListener('wheel',function(e){
+document.addEventListener('wheel',function(e){
   const list=e.target&&e.target.closest?e.target.closest('.cards-list'):null;
   if(list&&list.scrollHeight>list.clientHeight)return;
-  if(document.body.scrollWidth>document.body.clientWidth&&Math.abs(e.deltaY)>Math.abs(e.deltaX)){
-    document.body.scrollLeft+=e.deltaY;
+  const sc=document.scrollingElement||document.documentElement;
+  if(sc.scrollWidth>sc.clientWidth&&Math.abs(e.deltaY)>Math.abs(e.deltaX)){
+    sc.scrollLeft+=e.deltaY;
     e.preventDefault();
   }
 },{passive:false});
