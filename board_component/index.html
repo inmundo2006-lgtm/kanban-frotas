@@ -1,0 +1,241 @@
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>
+*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}
+body{background:transparent;overflow:auto;}
+#board{display:flex;gap:12px;padding:4px 2px 16px;align-items:flex-start;min-height:480px;}
+.column{min-width:360px;flex:1 1 360px;max-width:50%;background:#f8fafc;border-radius:10px;border:1px solid #e2e8f0;overflow:hidden;}
+.col-header{padding:9px 12px;display:flex;align-items:center;justify-content:space-between;color:#fff;font-size:12px;font-weight:700;border-radius:10px 10px 0 0;}
+.col-header.col-origem{outline:3px solid #fbbf24;outline-offset:-2px;}
+.col-header.col-destino{outline:3px solid #34d399;outline-offset:-2px;}
+.col-badge{background:rgba(255,255,255,.28);border-radius:20px;padding:1px 8px;font-size:11px;}
+.col-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;padding:2px 8px;text-align:center;}
+.col-label.origem{background:#fef3c7;color:#92400e;}
+.col-label.destino{background:#d1fae5;color:#065f46;}
+.cards-list{min-height:60px;padding:8px;display:flex;flex-direction:column;gap:6px;transition:background .15s;}
+.cards-list.drag-over{background:#e0f2fe;border-radius:0 0 8px 8px;}
+.card{background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px;cursor:grab;user-select:none;border-left:4px solid #1D9E75;transition:box-shadow .15s,transform .1s,opacity .15s;}
+.card.somente-leitura{cursor:default;}
+.card:hover{box-shadow:0 2px 8px rgba(0,0,0,.10);}
+.card:active{cursor:grabbing;transform:scale(.97);}
+.card.dragging{opacity:.35;}
+.card.drag-ghost{box-shadow:0 8px 24px rgba(0,0,0,.18);transform:rotate(2deg) scale(1.03);opacity:.95;pointer-events:none;position:fixed;z-index:9999;width:340px;}
+.card.destacado{border-left-width:5px;box-shadow:0 0 0 2px #fbbf24;background:#fffbeb;}
+.card.nao-destacado{opacity:.25;filter:grayscale(.6);pointer-events:none;}
+.card-name{font-size:12px;font-weight:600;color:#111;margin-bottom:2px;}
+.card-sub{font-size:10px;color:#6b7280;margin-bottom:4px;}
+.card-tag{display:inline-block;padding:1px 7px;border-radius:20px;font-size:10px;font-weight:600;margin-right:4px;}
+.card-frente{font-size:10px;color:#374151;margin-top:4px;padding:2px 6px;background:#f1f5f9;border-radius:4px;display:inline-flex;align-items:center;gap:4px;cursor:pointer;}
+.card-frente:hover{background:#dbeafe;color:#1e40af;}
+.tipo-header{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#475569;background:#e2e8f0;border-radius:5px;padding:3px 8px;margin-top:2px;}
+.card-obs-btn{font-size:10px;color:#6b7280;margin-top:5px;padding:2px 6px;background:#f8fafc;border:1px dashed #d1d5db;border-radius:4px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.card-obs-btn:hover{background:#eef2ff;color:#3730a3;}
+.card-obs-box textarea{width:100%;min-height:54px;font-size:11px;padding:6px;border:1px solid #d1d5db;border-radius:6px;resize:vertical;margin-top:5px;font-family:inherit;color:#111;background:#fff;}
+.card-obs-save{margin-top:4px;width:100%;padding:4px 0;font-size:11px;border-radius:6px;border:1px solid #0F6E56;background:#1D9E75;color:#fff;cursor:pointer;font-weight:600;}
+.card-obs-save:hover{background:#0F6E56;}
+.empty-hint{text-align:center;font-size:11px;color:#9ca3af;padding:14px 6px;border:1px dashed #d1d5db;border-radius:6px;}
+.modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10000;align-items:center;justify-content:center;}
+.modal-bg.open{display:flex;}
+.modal{background:#fff;border-radius:12px;padding:20px;width:340px;box-shadow:0 20px 60px rgba(0,0,0,.25);}
+.modal h3{font-size:15px;font-weight:600;margin-bottom:6px;color:#111;}
+.modal .sub{font-size:12px;color:#6b7280;margin-bottom:16px;}
+.modal select{width:100%;padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;font-size:13px;margin-bottom:14px;background:#fff;color:#111;}
+.modal-btns{display:flex;gap:8px;justify-content:flex-end;}
+.btn{padding:7px 16px;border-radius:8px;font-size:13px;cursor:pointer;border:1px solid #d1d5db;background:#fff;color:#111;}
+.btn:hover{background:#f1f5f9;}
+.btn.primary{background:#1D9E75;color:#fff;border-color:#0F6E56;}
+.btn.primary:hover{background:#0F6E56;}
+.btn.danger{background:#fee2e2;color:#991b1b;border-color:#fca5a5;}
+.btn.danger:hover{background:#fecaca;}
+</style></head><body>
+<div id="board"></div>
+<div class="modal-bg" id="modalBg">
+  <div class="modal">
+    <h3 id="modalNome"></h3>
+    <div class="sub" id="modalSub"></div>
+    <select id="modalSelect"></select>
+    <div class="modal-btns">
+      <button class="btn danger" onclick="marcarVendido()">🪦 Marcar vendido</button>
+      <button class="btn" onclick="fecharModal()">Cancelar</button>
+      <button class="btn primary" onclick="salvarFrente()">Salvar frente</button>
+    </div>
+  </div>
+</div>
+<script>
+function _msg(type,data){window.parent.postMessage(Object.assign({isStreamlitMessage:true,type:type},data||{}),"*");}
+function enviarAcao(acao,frotaId,valor){
+  _msg("streamlit:setComponentValue",{dataType:"json",
+    value:{acao:acao,frota_id:frotaId,valor:(valor===undefined||valor===null)?"":valor,
+           nonce:Date.now()+"-"+Math.random().toString(36).slice(2)}});
+}
+
+let DATA=null,PODE_EDITAR=false,nomesCc=[],nomesFr=[];
+let dragFrotaId=null,dragEl=null,ghostEl=null,modalFrotaId=null;
+
+function render(){
+  const board=document.getElementById('board');
+  board.innerHTML='';
+  DATA.ccs.forEach(cc=>{
+    const cards=DATA.frotas_por_cc[cc.nome]||[];
+    const col=document.createElement('div');
+    col.className='column';
+    const origemCls =cc.destaque?' col-origem':'';
+    const destinoCls=cc.destino?' col-destino':'';
+    const labelO=cc.destaque?'<div class="col-label origem">📍 Origem</div>':'';
+    const labelD=cc.destino ?'<div class="col-label destino">🎯 Destino</div>':'';
+    col.innerHTML=`
+      <div class="col-header${origemCls}${destinoCls}" style="background:${cc.cor}">
+        <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:290px" title="${cc.nome}">${cc.nome}</span>
+        <span class="col-badge">${cards.length}</span>
+      </div>${labelO}${labelD}
+      <div class="cards-list" data-cc="${cc.nome}" id="list-${cc.nome.replace(/[^a-z0-9]/gi,'_')}"></div>`;
+    board.appendChild(col);
+    const list=col.querySelector('.cards-list');
+    setupDrop(list,cc.nome);
+    if(cards.length===0){list.innerHTML='<div class="empty-hint">Sem frotas</div>';}
+    else{
+      const temDest=DATA.ids_destacados&&DATA.ids_destacados.length>0;
+      const grupos={};
+      cards.forEach(f=>{(grupos[f.tipo]=grupos[f.tipo]||[]).push(f);});
+      const ordem=DATA.tipos_ordem.concat(Object.keys(grupos).filter(t=>!DATA.tipos_ordem.includes(t)));
+      ordem.forEach(t=>{
+        const g=grupos[t];if(!g||!g.length)return;
+        const gh=document.createElement('div');
+        gh.className='tipo-header';
+        gh.innerHTML=`${DATA.tipo_emoji[t]||'📦'} ${t} (${g.length})`;
+        list.appendChild(gh);
+        g.forEach(f=>list.appendChild(criarCard(f,cc.cor,temDest)));
+      });
+    }
+  });
+}
+
+function criarCard(frota,corCC,temDest){
+  const el=document.createElement('div');
+  let cls='card';
+  if(temDest) cls+=frota.destacado?' destacado':' nao-destacado';
+  if(!PODE_EDITAR) cls+=' somente-leitura';
+  el.className=cls;
+  el.dataset.id=frota.id;
+  el.style.borderLeftColor=corCC;
+  const sub=[frota.chassi,frota.ano].filter(Boolean).join(' | ');
+  const frLabel=frota.frente||'+ frente';
+  el.innerHTML=`
+    <div class="card-name">${DATA.tipo_emoji[frota.tipo]||'📦'} ${frota.nome}</div>
+    ${sub?`<div class="card-sub">${sub}</div>`:''}
+    <span class="card-tag" style="background:${frota.cor_bg};color:${frota.cor_tx}">${frota.tipo}</span>
+    <div class="card-frente" style="${PODE_EDITAR?'':'cursor:default;opacity:.7'}">⚡ ${frLabel}</div>`;
+  const frenteEl=el.querySelector('.card-frente');
+  if(PODE_EDITAR){
+    frenteEl.addEventListener('click',ev=>abrirModal(ev,frota.id,frota.nome,frota.frente||''));
+  }
+  const obsBtn=document.createElement('div');
+  obsBtn.className='card-obs-btn';
+  obsBtn.textContent=frota.obs?'📝 '+frota.obs:(PODE_EDITAR?'📝 + observação':'');
+  if(frota.obs)obsBtn.title=frota.obs;
+  if(frota.obs||PODE_EDITAR)el.appendChild(obsBtn);
+  if(PODE_EDITAR){
+    const obsBox=document.createElement('div');
+    obsBox.className='card-obs-box';
+    obsBox.style.display='none';
+    const ta=document.createElement('textarea');
+    ta.value=frota.obs||'';
+    ta.placeholder='Escreva a observação...';
+    ta.addEventListener('mousedown',ev=>{ev.stopPropagation();el.draggable=false;});
+    ta.addEventListener('blur',()=>{el.draggable=true;});
+    const sv=document.createElement('button');
+    sv.className='card-obs-save';
+    sv.textContent='💾 Salvar observação';
+    sv.onclick=ev=>{ev.stopPropagation();enviarAcao('salvar_obs',frota.id,ta.value);};
+    obsBox.appendChild(ta);obsBox.appendChild(sv);
+    el.appendChild(obsBox);
+    obsBtn.onclick=ev=>{ev.stopPropagation();
+      obsBox.style.display=obsBox.style.display==='none'?'block':'none';
+      if(obsBox.style.display==='block')ta.focus();};
+  }
+  el.draggable=PODE_EDITAR;
+  if(!PODE_EDITAR){ el.style.cursor='default'; return el; }
+  el.addEventListener('dragstart',e=>{
+    dragFrotaId=frota.id;dragEl=el;
+    setTimeout(()=>el.classList.add('dragging'),0);
+    e.dataTransfer.effectAllowed='move';
+    ghostEl=el.cloneNode(true);
+    ghostEl.className='card drag-ghost';
+    ghostEl.style.cssText+=`;left:${e.clientX}px;top:${e.clientY}px`;
+    document.body.appendChild(ghostEl);
+    e.dataTransfer.setDragImage(new Image(),0,0);
+  });
+  el.addEventListener('drag',e=>{if(ghostEl&&e.clientX>0){ghostEl.style.left=(e.clientX+12)+'px';ghostEl.style.top=(e.clientY-20)+'px';}});
+  el.addEventListener('dragend',()=>{
+    el.classList.remove('dragging');
+    if(ghostEl){ghostEl.remove();ghostEl=null;}
+    dragFrotaId=dragEl=null;
+  });
+  return el;
+}
+
+function setupDrop(listEl,ccNome){
+  if(!PODE_EDITAR) return;
+  listEl.addEventListener('dragover',e=>{e.preventDefault();listEl.classList.add('drag-over');});
+  listEl.addEventListener('dragleave',e=>{if(!listEl.contains(e.relatedTarget))listEl.classList.remove('drag-over');});
+  listEl.addEventListener('drop',e=>{
+    e.preventDefault();listEl.classList.remove('drag-over');
+    if(!dragFrotaId)return;
+    let ccAtual='';
+    for(const cc of DATA.ccs){if((DATA.frotas_por_cc[cc.nome]||[]).some(f=>f.id===dragFrotaId)){ccAtual=cc.nome;break;}}
+    if(ccAtual===ccNome)return;
+    const idMovido=dragFrotaId;
+    for(const cc of DATA.ccs){
+      const lista=DATA.frotas_por_cc[cc.nome];if(!lista)continue;
+      const idx=lista.findIndex(f=>f.id===idMovido);
+      if(idx!==-1){const[frota]=lista.splice(idx,1);frota.frente='';if(!DATA.frotas_por_cc[ccNome])DATA.frotas_por_cc[ccNome]=[];DATA.frotas_por_cc[ccNome].push(frota);break;}
+    }
+    render();
+    enviarAcao('mover_cc',idMovido,ccNome==='📦 Sem alocação'?'':ccNome);
+  });
+}
+
+function abrirModal(e,frotaId,frotaNome,frenteAtual){
+  e.stopPropagation();
+  modalFrotaId=frotaId;
+  document.getElementById('modalNome').textContent=frotaNome;
+  document.getElementById('modalSub').textContent=frenteAtual?`Frente atual: ${frenteAtual}`:'Sem frente definida';
+  const sel=document.getElementById('modalSelect');
+  sel.innerHTML='';
+  nomesFr.forEach(fr=>{
+    const opt=document.createElement('option');
+    opt.value=fr==='— Sem frente —'?'__sem__':fr;
+    opt.textContent=fr;
+    if(fr===frenteAtual||(fr==='— Sem frente —'&&!frenteAtual))opt.selected=true;
+    sel.appendChild(opt);
+  });
+  document.getElementById('modalBg').classList.add('open');
+}
+function fecharModal(){document.getElementById('modalBg').classList.remove('open');modalFrotaId=null;}
+function salvarFrente(){
+  if(!modalFrotaId)return;
+  const val=document.getElementById('modalSelect').value;
+  const id=modalFrotaId;
+  fecharModal();
+  enviarAcao('mover_frente',id,val);
+}
+function marcarVendido(){
+  if(!modalFrotaId)return;
+  const id=modalFrotaId;
+  fecharModal();
+  enviarAcao('vender',id,'vendido');
+}
+document.getElementById('modalBg').addEventListener('click',e=>{if(e.target===document.getElementById('modalBg'))fecharModal();});
+
+window.addEventListener('message',function(ev){
+  const m=ev.data;
+  if(!m||m.type!=='streamlit:render')return;
+  DATA=(m.args&&m.args.data)||DATA;
+  if(!DATA)return;
+  PODE_EDITAR=!!DATA.pode_editar;
+  nomesCc=DATA.nomes_cc||[];
+  nomesFr=DATA.nomes_fr||[];
+  render();
+  _msg('streamlit:setFrameHeight',{height:DATA.altura||720});
+});
+_msg('streamlit:componentReady',{apiVersion:1});
+</script></body></html>

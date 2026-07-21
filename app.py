@@ -308,36 +308,11 @@ ids_frota_com_entrega_pendente = {e["frota_id"] for e in entregas_pendentes if e
 # ─────────────────────────────────────────────
 # PROCESSAR AÇÕES (query params)
 # ─────────────────────────────────────────────
-params   = st.query_params
-acao     = params.get("acao","")
-frota_id = params.get("frota_id","")
-valor    = params.get("valor","")
-
-if acao == "mover_cc" and frota_id and valor is not None:
-    if not PODE_EDITAR:
-        st.query_params.clear(); st.rerun()
-    try:
-        mover_cc(frota_id, valor)
-        st.query_params.clear(); st.rerun()
-    except Exception as e:
-        st.error(f"Erro ao mover: {e}")
-elif acao == "mover_frente" and frota_id:
-    if not PODE_EDITAR:
-        st.query_params.clear(); st.rerun()
-    try:
-        mover_frente(frota_id, valor if valor != "__sem__" else "")
-        st.query_params.clear(); st.rerun()
-    except Exception as e:
-        st.error(f"Erro ao salvar frente: {e}")
-elif acao == "salvar_obs" and frota_id:
-    if not PODE_EDITAR:
-        st.query_params.clear(); st.rerun()
-    try:
-        patch_item(LISTA_FROTAS, frota_id, {"Obs": valor})
-        invalidar()
-        st.query_params.clear(); st.rerun()
-    except Exception as e:
-        st.error(f"Erro ao salvar observação: {e}")
+# As ações do board (mover, salvar obs, vender) agora chegam via componente
+# bidirecional (postMessage) — sem recarregar a página e sem derrubar o login.
+# O visual/JS do board fica em board_component/index.html.
+_BOARD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "board_component")
+kanban_board = components.declare_component("kanban_board", path=_BOARD_DIR)
 
 # ─────────────────────────────────────────────
 # CSS
@@ -510,7 +485,8 @@ with aba_board:
             f'<div style="font-size:11px;color:#6b7280">{lbl}</div></div>',
             unsafe_allow_html=True)
 
-    # ── BOARD HTML ────────────────────────────
+    # ── (LEGADO — NÃO USADO) O board real agora está em board_component/index.html.
+    # Este bloco antigo foi mantido apenas como referência e pode ser apagado.
     board_json = json.dumps(board_data, ensure_ascii=False)
 
     BOARD_HTML = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
@@ -753,11 +729,32 @@ document.getElementById('modalBg').addEventListener('click',e=>{{if(e.target===d
 render();
 </script></body></html>"""
 
-    components.html(BOARD_HTML, height=720, scrolling=True)
+    # Componente bidirecional: renderiza o board e devolve as ações do usuário
+    evento = kanban_board(data=board_data, key="board_kanban", default=None)
+
+    if evento and isinstance(evento, dict) and PODE_EDITAR:
+        if st.session_state.get("_board_nonce") != evento.get("nonce"):
+            st.session_state["_board_nonce"] = evento.get("nonce")
+            _ac  = evento.get("acao", "")
+            _fid = str(evento.get("frota_id", "") or "")
+            _val = evento.get("valor", "") or ""
+            try:
+                if _ac == "mover_cc" and _fid:
+                    mover_cc(_fid, _val); st.rerun()
+                elif _ac == "mover_frente" and _fid:
+                    mover_frente(_fid, "" if _val == "__sem__" else _val); st.rerun()
+                elif _ac == "salvar_obs" and _fid:
+                    patch_item(LISTA_FROTAS, _fid, {"Obs": _val})
+                    invalidar(); st.rerun()
+                elif _ac == "vender" and _fid:
+                    st.session_state["vender_frota_id"] = _fid
+            except Exception as e:
+                st.error(f"Erro ao executar ação: {e}")
 
     # ── Modal vender (via Streamlit) ──────────
-    if acao == "vender" and frota_id and PODE_EDITAR:
-        frota_obj = next((f for f in frotas_ativas if f["id"] == frota_id), None)
+    frota_id_venda = st.session_state.get("vender_frota_id", "")
+    if frota_id_venda and PODE_EDITAR:
+        frota_obj = next((f for f in frotas_ativas if f["id"] == frota_id_venda), None)
         if frota_obj:
             with st.form("form_venda"):
                 st.subheader(f"🪦 Marcar como vendido: {frota_obj['nome']}")
@@ -767,11 +764,11 @@ render();
                 c1, c2 = st.columns(2)
                 with c1:
                     if st.form_submit_button("✅ Confirmar venda", type="primary"):
-                        vender_frota(frota_id, str(dv), vv, ov)
-                        st.query_params.clear(); st.rerun()
+                        vender_frota(frota_id_venda, str(dv), vv, ov)
+                        st.session_state.pop("vender_frota_id", None); st.rerun()
                 with c2:
                     if st.form_submit_button("Cancelar"):
-                        st.query_params.clear(); st.rerun()
+                        st.session_state.pop("vender_frota_id", None); st.rerun()
 
 # ══════════════════════════════════════════════
 # ABA 2 — NOVA FROTA
