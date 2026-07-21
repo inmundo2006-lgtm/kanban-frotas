@@ -436,6 +436,15 @@ with aba_board:
         for cc in ccs_board
     }
 
+    # Com filtro ativo, oculta colunas sem nenhum card visível
+    # (mantém sempre as colunas escolhidas em origem/destino)
+    if filtro_tipo or busca or frente_ativa:
+        ccs_board = [c for c in ccs_board
+                     if frotas_por_cc.get(c["nome"])
+                     or (cc_origem_ativo and c["nome"] == filtro_cc_origem)
+                     or (cc_destino_ativo and c["nome"] == filtro_cc_destino)]
+        frotas_por_cc = {c["nome"]: frotas_por_cc[c["nome"]] for c in ccs_board}
+
     board_data = {
         "pode_editar": PODE_EDITAR,
         "ccs": [{
