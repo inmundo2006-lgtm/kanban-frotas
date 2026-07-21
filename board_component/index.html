@@ -1,7 +1,7 @@
 <!DOCTYPE html><html><head><meta charset="utf-8">
 <style>
 *{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}
-body{background:transparent;overflow:auto;}
+body{background:transparent;overflow-x:auto;overflow-y:hidden;}
 #board{display:flex;gap:12px;padding:4px 2px 16px;align-items:flex-start;min-height:480px;}
 .column{min-width:360px;flex:1 1 360px;max-width:50%;background:#f8fafc;border-radius:10px;border:1px solid #e2e8f0;overflow:hidden;}
 .col-header{padding:9px 12px;display:flex;align-items:center;justify-content:space-between;color:#fff;font-size:12px;font-weight:700;border-radius:10px 10px 0 0;}
@@ -11,7 +11,7 @@ body{background:transparent;overflow:auto;}
 .col-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;padding:2px 8px;text-align:center;}
 .col-label.origem{background:#fef3c7;color:#92400e;}
 .col-label.destino{background:#d1fae5;color:#065f46;}
-.cards-list{min-height:60px;padding:8px;display:flex;flex-direction:column;gap:6px;transition:background .15s;}
+.cards-list{min-height:60px;max-height:540px;overflow-y:auto;padding:8px;display:flex;flex-direction:column;gap:6px;transition:background .15s;}
 .cards-list.drag-over{background:#e0f2fe;border-radius:0 0 8px 8px;}
 .card{background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px;cursor:grab;user-select:none;border-left:4px solid #1D9E75;transition:box-shadow .15s,transform .1s,opacity .15s;}
 .card.somente-leitura{cursor:default;}
@@ -235,7 +235,9 @@ window.addEventListener('message',function(ev){
   nomesCc=DATA.nomes_cc||[];
   nomesFr=DATA.nomes_fr||[];
   render();
-  _msg('streamlit:setFrameHeight',{height:DATA.altura||720});
+  requestAnimationFrame(function(){
+    _msg('streamlit:setFrameHeight',{height:Math.max(420,document.documentElement.scrollHeight+24)});
+  });
 });
 _msg('streamlit:componentReady',{apiVersion:1});
 </script></body></html>
