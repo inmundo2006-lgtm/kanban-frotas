@@ -1,6 +1,6 @@
 import streamlit as st
 import streamlit.components.v1 as components
-import requests, json, time, hashlib
+import requests, json, time, hashlib, base64, os
 from datetime import datetime
 import io
 from openpyxl import Workbook
@@ -72,8 +72,51 @@ LISTA_FROTAS  = st.secrets.get("LISTA_FROTAS",  "KanbanFrotas")
 LISTA_ENTREGA = st.secrets.get("LISTA_ENTREGA_FUTURA", "KanbanEntregaFutura")
 
 TIPOS = ["Colhedora","Transbordo","Trator","Caminhão","Veículo","Implemento","Apoio","Área de Vivência","Outro"]
-TIPO_EMOJI = {"Colhedora":"🌾","Transbordo":"🚛","Trator":"🚜","Caminhão":"🚚",
-               "Veículo":"🚗","Implemento":"⚙️","Apoio":"🔧",
+# Ícones SVG customizados (inline, sem dependência externa) — herdam a cor do texto
+SVG_COLHEDORA  = ("<svg viewBox='0 0 24 24' width='15' height='15' style='vertical-align:-2px' "
+                  "xmlns='http://www.w3.org/2000/svg'><g fill='currentColor'>"
+                  "<path d='M2 16.2l3-6.2v6.2z'/>"
+                  "<rect x='5.2' y='10.3' width='10' height='5.9' rx='.8'/>"
+                  "<path d='M6.2 10.3V6.1c0-.7.6-1.3 1.3-1.3h3.2c.7 0 1.3.6 1.3 1.3v4.2z'/>"
+                  "<path d='M14.3 11.2l6.5-6.5 1.9 1.9-6.5 6.5z'/>"
+                  "<circle cx='21.9' cy='5.7' r='1.6'/>"
+                  "<circle cx='7.6' cy='18.1' r='2.3'/><circle cx='13.6' cy='18.1' r='2.3'/>"
+                  "</g></svg>")
+SVG_IMPLEMENTO = ("<svg viewBox='0 0 24 24' width='15' height='15' style='vertical-align:-2px' "
+                  "xmlns='http://www.w3.org/2000/svg'><g fill='currentColor'>"
+                  "<path d='M12 2.2l4.8 4.8H7.2z'/>"
+                  "<rect x='1.8' y='7.6' width='20.4' height='2.4' rx='1'/>"
+                  "<rect x='4.7' y='9.8' width='1.4' height='3.4'/><rect x='9.2' y='9.8' width='1.4' height='3.4'/>"
+                  "<rect x='13.7' y='9.8' width='1.4' height='3.4'/><rect x='18.2' y='9.8' width='1.4' height='3.4'/>"
+                  "<circle cx='5.4' cy='16' r='3'/><circle cx='9.9' cy='16' r='3'/>"
+                  "<circle cx='14.4' cy='16' r='3'/><circle cx='18.9' cy='16' r='3'/>"
+                  "</g></svg>")
+SVG_APOIO      = ("<svg viewBox='0 0 24 24' width='15' height='15' style='vertical-align:-2px' "
+                  "xmlns='http://www.w3.org/2000/svg'><g fill='currentColor'>"
+                  "<path d='M2 10V7.5C2 5 4 3 6.5 3h11C20 3 22 5 22 7.5V10z'/>"
+                  "<path d='M2 11.5h7.5V14h5v-2.5H22V21H2z'/>"
+                  "<rect x='10' y='8.5' width='4' height='4.6' rx='.8'/>"
+                  "</g></svg>")
+def _icone_png(nome, fallback, px=16):
+    """Procura <nome>.png na raiz do projeto ou na pasta icones/;
+    senão, usa o fallback (SVG desenhado). Ideal: PNGs de até 64x64 px."""
+    raiz = os.path.dirname(os.path.abspath(__file__))
+    for caminho in (os.path.join(raiz, f"{nome}.png"),
+                    os.path.join(raiz, "icones", f"{nome}.png")):
+        try:
+            with open(caminho, "rb") as fp:
+                b64 = base64.b64encode(fp.read()).decode()
+            return (f"<img src='data:image/png;base64,{b64}' width='{px}' height='{px}' "
+                    f"style='vertical-align:-3px;object-fit:contain'/>")
+        except Exception:
+            continue
+    return fallback
+
+TIPO_EMOJI = {"Colhedora": _icone_png("colhedora", SVG_COLHEDORA),
+               "Transbordo":"🚛","Trator":"🚜","Caminhão":"🚚",
+               "Veículo":"🚗",
+               "Implemento": _icone_png("implemento", SVG_IMPLEMENTO),
+               "Apoio": _icone_png("apoio", SVG_APOIO),
                "Área de Vivência":"🏠","Outro":"📦"}
 CORES_CC = ["#1D9E75","#378ADD","#BA7517","#D85A30","#7F77DD","#D4537E",
             "#639922","#0F6E56","#185FA5","#854F0B","#993C1D","#534AB7",
@@ -431,7 +474,6 @@ with aba_board:
                 "id":        f["id"],
                 "nome":      f["nome"],
                 "tipo":      f["tipo"],
-                "emoji":     TIPO_EMOJI.get(f["tipo"],"📦"),
                 "chassi":    f["chassi"],
                 "ano":       f["ano"],
                 "frente":    f["frente_nome"],
@@ -476,7 +518,7 @@ with aba_board:
 *{{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}}
 body{{background:transparent;overflow-x:auto;}}
 #board{{display:flex;gap:12px;padding:4px 2px 16px;align-items:flex-start;min-height:480px;}}
-.column{{min-width:300px;width:300px;flex-shrink:0;background:#f8fafc;border-radius:10px;border:1px solid #e2e8f0;overflow:hidden;}}
+.column{{min-width:360px;flex:1 1 360px;background:#f8fafc;border-radius:10px;border:1px solid #e2e8f0;overflow:hidden;}}
 .col-header{{padding:9px 12px;display:flex;align-items:center;justify-content:space-between;color:#fff;font-size:12px;font-weight:700;border-radius:10px 10px 0 0;}}
 .col-header.col-origem{{outline:3px solid #fbbf24;outline-offset:-2px;}}
 .col-header.col-destino{{outline:3px solid #34d399;outline-offset:-2px;}}
@@ -491,7 +533,7 @@ body{{background:transparent;overflow-x:auto;}}
 .card:hover{{box-shadow:0 2px 8px rgba(0,0,0,.10);}}
 .card:active{{cursor:grabbing;transform:scale(.97);}}
 .card.dragging{{opacity:.35;}}
-.card.drag-ghost{{box-shadow:0 8px 24px rgba(0,0,0,.18);transform:rotate(2deg) scale(1.03);opacity:.95;pointer-events:none;position:fixed;z-index:9999;width:290px;}}
+.card.drag-ghost{{box-shadow:0 8px 24px rgba(0,0,0,.18);transform:rotate(2deg) scale(1.03);opacity:.95;pointer-events:none;position:fixed;z-index:9999;width:340px;}}
 .card.destacado{{border-left-width:5px;box-shadow:0 0 0 2px #fbbf24;background:#fffbeb;}}
 .card.nao-destacado{{opacity:.25;filter:grayscale(.6);pointer-events:none;}}
 .card-name{{font-size:12px;font-weight:600;color:#111;margin-bottom:2px;}}
@@ -553,7 +595,7 @@ function render(){{
     const labelD=cc.destino ?'<div class="col-label destino">🎯 Destino</div>':'';
     col.innerHTML=`
       <div class="col-header${{origemCls}}${{destinoCls}}" style="background:${{cc.cor}}">
-        <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:230px" title="${{cc.nome}}">${{cc.nome}}</span>
+        <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:290px" title="${{cc.nome}}">${{cc.nome}}</span>
         <span class="col-badge">${{cards.length}}</span>
       </div>${{labelO}}${{labelD}}
       <div class="cards-list" data-cc="${{cc.nome}}" id="list-${{cc.nome.replace(/[^a-z0-9]/gi,'_')}}"></div>`;
@@ -570,7 +612,7 @@ function render(){{
         const g=grupos[t];if(!g||!g.length)return;
         const gh=document.createElement('div');
         gh.className='tipo-header';
-        gh.textContent=`${{DATA.tipo_emoji[t]||'📦'}} ${{t}} (${{g.length}})`;
+        gh.innerHTML=`${{DATA.tipo_emoji[t]||'📦'}} ${{t}} (${{g.length}})`;
         list.appendChild(gh);
         g.forEach(f=>list.appendChild(criarCard(f,cc.cor,temDest)));
       }});
@@ -590,7 +632,7 @@ function criarCard(frota,corCC,temDest){{
   const frLabel=frota.frente||'+ frente';
   const frenteAttr=PODE_EDITAR?`onclick="abrirModal(event,'${{frota.id}}','${{frota.nome.replace(/'/g,"\\'")}}','${{(frota.frente||'').replace(/'/g,"\\'")}}')"`:'';
   el.innerHTML=`
-    <div class="card-name">${{frota.emoji}} ${{frota.nome}}</div>
+    <div class="card-name">${{DATA.tipo_emoji[frota.tipo]||'📦'}} ${{frota.nome}}</div>
     ${{sub?`<div class="card-sub">${{sub}}</div>`:''}}
     <span class="card-tag" style="background:${{frota.cor_bg}};color:${{frota.cor_tx}}">${{frota.tipo}}</span>
     <div class="card-frente" ${{frenteAttr}} style="${{PODE_EDITAR?'':'cursor:default;opacity:.7'}}">⚡ ${{frLabel}}</div>`;
