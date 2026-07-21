@@ -71,9 +71,10 @@ LISTA_FRENTES = st.secrets.get("LISTA_FRENTES", "KanbanFrentes")
 LISTA_FROTAS  = st.secrets.get("LISTA_FROTAS",  "KanbanFrotas")
 LISTA_ENTREGA = st.secrets.get("LISTA_ENTREGA_FUTURA", "KanbanEntregaFutura")
 
-TIPOS = ["Colhedora","Transbordo","Trator","Caminhão","Veículo","Implemento","Apoio","Outro"]
+TIPOS = ["Colhedora","Transbordo","Trator","Caminhão","Veículo","Implemento","Apoio","Área de Vivência","Outro"]
 TIPO_EMOJI = {"Colhedora":"🌾","Transbordo":"🚛","Trator":"🚜","Caminhão":"🚚",
-               "Veículo":"🚗","Implemento":"⚙️","Apoio":"🔧","Outro":"📦"}
+               "Veículo":"🚗","Implemento":"⚙️","Apoio":"🔧",
+               "Área de Vivência":"🏠","Outro":"📦"}
 CORES_CC = ["#1D9E75","#378ADD","#BA7517","#D85A30","#7F77DD","#D4537E",
             "#639922","#0F6E56","#185FA5","#854F0B","#993C1D","#534AB7",
             "#3B6D11","#A32D2D","#5b21b6","#9d174d","#166534","#374151"]
@@ -81,7 +82,8 @@ TIPO_COR = {
     "Colhedora":  ["#d1fae5","#065f46"], "Transbordo": ["#dbeafe","#1e40af"],
     "Trator":     ["#fef3c7","#92400e"], "Caminhão":   ["#ede9fe","#5b21b6"],
     "Veículo":    ["#fce7f3","#9d174d"], "Implemento": ["#f0fdf4","#166534"],
-    "Apoio":      ["#fee2e2","#991b1b"], "Outro":      ["#f3f4f6","#374151"],
+    "Apoio":      ["#fee2e2","#991b1b"], "Área de Vivência": ["#e0f2fe","#075985"],
+    "Outro":      ["#f3f4f6","#374151"],
 }
 
 # ─────────────────────────────────────────────
@@ -284,6 +286,15 @@ elif acao == "mover_frente" and frota_id:
         st.query_params.clear(); st.rerun()
     except Exception as e:
         st.error(f"Erro ao salvar frente: {e}")
+elif acao == "salvar_obs" and frota_id:
+    if not PODE_EDITAR:
+        st.query_params.clear(); st.rerun()
+    try:
+        patch_item(LISTA_FROTAS, frota_id, {"Obs": valor})
+        invalidar()
+        st.query_params.clear(); st.rerun()
+    except Exception as e:
+        st.error(f"Erro ao salvar observação: {e}")
 
 # ─────────────────────────────────────────────
 # CSS
@@ -331,10 +342,10 @@ with aba_board:
         busca = st.text_input("🔍 Buscar frota", placeholder="Número ou nome...")
     with f3:
         nomes_frente_opc = ["— Todas as frentes —"] + [fr["nome"] for fr in frentes]
-        filtro_frente = st.selectbox("⚡ Frente de corte", nomes_frente_opc,
+        filtro_frente = st.selectbox("⚡ Buscar frente", nomes_frente_opc,
                                      help="Filtra todos os equipamentos da frente selecionada")
 
-    f4, f5 = st.columns([2, 2])
+    f4, f5, f6 = st.columns([2, 2, 2])
     with f4:
         nomes_cc_opc = ["— Todos os CCs —"] + [c["nome"] for c in ccs]
         filtro_origem_idx = 0
@@ -351,6 +362,9 @@ with aba_board:
     with f5:
         nomes_cc_dest = ["— Sem filtro destino —"] + [c["nome"] for c in ccs] + ["📦 Sem alocação"]
         filtro_cc_destino = st.selectbox("🎯 CC de destino", nomes_cc_dest)
+    with f6:
+        busca_cc = st.text_input("🔍 Buscar centro de custo", placeholder="Nome do CC...",
+                                 help="Mostra só as colunas de CC que contêm o texto digitado")
 
     # ── LÓGICA DO BOARD ───────────────────────
     ccs_todos = ccs + [{"id":"__sem__","nome":"📦 Sem alocação","ordem":999}]
@@ -378,6 +392,10 @@ with aba_board:
         ccs_board = [c for c in ccs_todos if c["nome"] in ccs_com_frente]
     else:
         ccs_board = ccs_todos
+
+    # Filtro por nome de centro de custo
+    if busca_cc:
+        ccs_board = [c for c in ccs_board if busca_cc.lower() in c["nome"].lower()]
 
     # IDs destacados (frotas que batem na busca/origem)
     def frota_destacada(f):
@@ -417,6 +435,7 @@ with aba_board:
                 "chassi":    f["chassi"],
                 "ano":       f["ano"],
                 "frente":    f["frente_nome"],
+                "obs":       f.get("obs",""),
                 "cor_bg":    TIPO_COR.get(f["tipo"],["#f3f4f6","#374151"])[0],
                 "cor_tx":    TIPO_COR.get(f["tipo"],["#f3f4f6","#374151"])[1],
                 "destacado": f["id"] in ids_destacados,
@@ -425,6 +444,8 @@ with aba_board:
         },
         "nomes_cc": nomes_cc,
         "nomes_fr": nomes_fr,
+        "tipos_ordem": TIPOS,
+        "tipo_emoji": TIPO_EMOJI,
     }
 
     # ── MÉTRICAS ─────────────────────────────
@@ -455,7 +476,7 @@ with aba_board:
 *{{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}}
 body{{background:transparent;overflow-x:auto;}}
 #board{{display:flex;gap:12px;padding:4px 2px 16px;align-items:flex-start;min-height:480px;}}
-.column{{min-width:220px;width:220px;flex-shrink:0;background:#f8fafc;border-radius:10px;border:1px solid #e2e8f0;overflow:hidden;}}
+.column{{min-width:300px;width:300px;flex-shrink:0;background:#f8fafc;border-radius:10px;border:1px solid #e2e8f0;overflow:hidden;}}
 .col-header{{padding:9px 12px;display:flex;align-items:center;justify-content:space-between;color:#fff;font-size:12px;font-weight:700;border-radius:10px 10px 0 0;}}
 .col-header.col-origem{{outline:3px solid #fbbf24;outline-offset:-2px;}}
 .col-header.col-destino{{outline:3px solid #34d399;outline-offset:-2px;}}
@@ -470,7 +491,7 @@ body{{background:transparent;overflow-x:auto;}}
 .card:hover{{box-shadow:0 2px 8px rgba(0,0,0,.10);}}
 .card:active{{cursor:grabbing;transform:scale(.97);}}
 .card.dragging{{opacity:.35;}}
-.card.drag-ghost{{box-shadow:0 8px 24px rgba(0,0,0,.18);transform:rotate(2deg) scale(1.03);opacity:.95;pointer-events:none;position:fixed;z-index:9999;width:210px;}}
+.card.drag-ghost{{box-shadow:0 8px 24px rgba(0,0,0,.18);transform:rotate(2deg) scale(1.03);opacity:.95;pointer-events:none;position:fixed;z-index:9999;width:290px;}}
 .card.destacado{{border-left-width:5px;box-shadow:0 0 0 2px #fbbf24;background:#fffbeb;}}
 .card.nao-destacado{{opacity:.25;filter:grayscale(.6);pointer-events:none;}}
 .card-name{{font-size:12px;font-weight:600;color:#111;margin-bottom:2px;}}
@@ -478,6 +499,12 @@ body{{background:transparent;overflow-x:auto;}}
 .card-tag{{display:inline-block;padding:1px 7px;border-radius:20px;font-size:10px;font-weight:600;margin-right:4px;}}
 .card-frente{{font-size:10px;color:#374151;margin-top:4px;padding:2px 6px;background:#f1f5f9;border-radius:4px;display:inline-flex;align-items:center;gap:4px;cursor:pointer;}}
 .card-frente:hover{{background:#dbeafe;color:#1e40af;}}
+.tipo-header{{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#475569;background:#e2e8f0;border-radius:5px;padding:3px 8px;margin-top:2px;}}
+.card-obs-btn{{font-size:10px;color:#6b7280;margin-top:5px;padding:2px 6px;background:#f8fafc;border:1px dashed #d1d5db;border-radius:4px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}}
+.card-obs-btn:hover{{background:#eef2ff;color:#3730a3;}}
+.card-obs-box textarea{{width:100%;min-height:54px;font-size:11px;padding:6px;border:1px solid #d1d5db;border-radius:6px;resize:vertical;margin-top:5px;font-family:inherit;color:#111;background:#fff;}}
+.card-obs-save{{margin-top:4px;width:100%;padding:4px 0;font-size:11px;border-radius:6px;border:1px solid #0F6E56;background:#1D9E75;color:#fff;cursor:pointer;font-weight:600;}}
+.card-obs-save:hover{{background:#0F6E56;}}
 .empty-hint{{text-align:center;font-size:11px;color:#9ca3af;padding:14px 6px;border:1px dashed #d1d5db;border-radius:6px;}}
 .modal-bg{{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10000;align-items:center;justify-content:center;}}
 .modal-bg.open{{display:flex;}}
@@ -526,7 +553,7 @@ function render(){{
     const labelD=cc.destino ?'<div class="col-label destino">🎯 Destino</div>':'';
     col.innerHTML=`
       <div class="col-header${{origemCls}}${{destinoCls}}" style="background:${{cc.cor}}">
-        <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:160px" title="${{cc.nome}}">${{cc.nome}}</span>
+        <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:230px" title="${{cc.nome}}">${{cc.nome}}</span>
         <span class="col-badge">${{cards.length}}</span>
       </div>${{labelO}}${{labelD}}
       <div class="cards-list" data-cc="${{cc.nome}}" id="list-${{cc.nome.replace(/[^a-z0-9]/gi,'_')}}"></div>`;
@@ -536,7 +563,17 @@ function render(){{
     if(cards.length===0){{list.innerHTML='<div class="empty-hint">Sem frotas</div>';}}
     else{{
       const temDest=DATA.ids_destacados&&DATA.ids_destacados.length>0;
-      cards.forEach(f=>list.appendChild(criarCard(f,cc.cor,temDest)));
+      const grupos={{}};
+      cards.forEach(f=>{{(grupos[f.tipo]=grupos[f.tipo]||[]).push(f);}});
+      const ordem=DATA.tipos_ordem.concat(Object.keys(grupos).filter(t=>!DATA.tipos_ordem.includes(t)));
+      ordem.forEach(t=>{{
+        const g=grupos[t];if(!g||!g.length)return;
+        const gh=document.createElement('div');
+        gh.className='tipo-header';
+        gh.textContent=`${{DATA.tipo_emoji[t]||'📦'}} ${{t}} (${{g.length}})`;
+        list.appendChild(gh);
+        g.forEach(f=>list.appendChild(criarCard(f,cc.cor,temDest)));
+      }});
     }}
   }});
 }}
@@ -557,6 +594,31 @@ function criarCard(frota,corCC,temDest){{
     ${{sub?`<div class="card-sub">${{sub}}</div>`:''}}
     <span class="card-tag" style="background:${{frota.cor_bg}};color:${{frota.cor_tx}}">${{frota.tipo}}</span>
     <div class="card-frente" ${{frenteAttr}} style="${{PODE_EDITAR?'':'cursor:default;opacity:.7'}}">⚡ ${{frLabel}}</div>`;
+  // Observação no card
+  const obsBtn=document.createElement('div');
+  obsBtn.className='card-obs-btn';
+  obsBtn.textContent=frota.obs?'📝 '+frota.obs:(PODE_EDITAR?'📝 + observação':'');
+  if(frota.obs)obsBtn.title=frota.obs;
+  if(frota.obs||PODE_EDITAR)el.appendChild(obsBtn);
+  if(PODE_EDITAR){{
+    const obsBox=document.createElement('div');
+    obsBox.className='card-obs-box';
+    obsBox.style.display='none';
+    const ta=document.createElement('textarea');
+    ta.value=frota.obs||'';
+    ta.placeholder='Escreva a observação...';
+    ta.addEventListener('mousedown',ev=>{{ev.stopPropagation();el.draggable=false;}});
+    ta.addEventListener('blur',()=>{{el.draggable=true;}});
+    const sv=document.createElement('button');
+    sv.className='card-obs-save';
+    sv.textContent='💾 Salvar observação';
+    sv.onclick=ev=>{{ev.stopPropagation();salvarObs(frota.id,ta.value);}};
+    obsBox.appendChild(ta);obsBox.appendChild(sv);
+    el.appendChild(obsBox);
+    obsBtn.onclick=ev=>{{ev.stopPropagation();
+      obsBox.style.display=obsBox.style.display==='none'?'block':'none';
+      if(obsBox.style.display==='block')ta.focus();}};
+  }}
   el.draggable=PODE_EDITAR;
   if(!PODE_EDITAR){{ el.style.cursor='default'; return el; }}
   el.addEventListener('dragstart',e=>{{
@@ -629,6 +691,13 @@ function salvarFrente(){{
   url.searchParams.set('valor',val);
   window.parent.location.href=url.toString();
 }}
+function salvarObs(frotaId,texto){{
+  const url=new URL(window.parent.location.href);
+  url.searchParams.set('acao','salvar_obs');
+  url.searchParams.set('frota_id',frotaId);
+  url.searchParams.set('valor',texto);
+  window.parent.location.href=url.toString();
+}}
 function marcarVendido(){{
   if(!modalFrotaId)return;
   fecharModal();
@@ -642,7 +711,7 @@ document.getElementById('modalBg').addEventListener('click',e=>{{if(e.target===d
 render();
 </script></body></html>"""
 
-    components.html(BOARD_HTML, height=680, scrolling=True)
+    components.html(BOARD_HTML, height=720, scrolling=True)
 
     # ── Modal vender (via Streamlit) ──────────
     if acao == "vender" and frota_id and PODE_EDITAR:
@@ -996,7 +1065,7 @@ with aba_export:
                         sum(1 for f in fc if f["tipo"]=="Trator"),
                         sum(1 for f in fc if f["tipo"]=="Caminhão"),
                         sum(1 for f in fc if f["tipo"]=="Veículo"),
-                        sum(1 for f in fc if f["tipo"] in("Implemento","Apoio","Outro"))]
+                        sum(1 for f in fc if f["tipo"] in("Implemento","Apoio","Área de Vivência","Outro"))]
                 for ci,v in enumerate(linha2,1): ws2.cell(row=r2,column=ci,value=v)
                 lin_s(ws2,r2,range(1,9),"EFF6FF" if r2%2==0 else "FFFFFF"); r2+=1
             ws2.cell(r2,1,"TOTAL")
