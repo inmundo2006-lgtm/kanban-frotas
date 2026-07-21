@@ -73,6 +73,8 @@ let dragFrotaId=null,dragEl=null,ghostEl=null,modalFrotaId=null;
 
 function render(){
   const board=document.getElementById('board');
+  const scrollAnterior={};
+  board.querySelectorAll('.cards-list').forEach(l=>{if(l.dataset.cc)scrollAnterior[l.dataset.cc]=l.scrollTop;});
   board.innerHTML='';
   DATA.ccs.forEach(cc=>{
     const cards=DATA.frotas_por_cc[cc.nome]||[];
@@ -106,6 +108,7 @@ function render(){
         g.forEach(f=>list.appendChild(criarCard(f,cc.cor,temDest)));
       });
     }
+    if(scrollAnterior[cc.nome])list.scrollTop=scrollAnterior[cc.nome];
   });
 }
 
@@ -226,16 +229,20 @@ function marcarVendido(){
 }
 document.getElementById('modalBg').addEventListener('click',e=>{if(e.target===document.getElementById('modalBg'))fecharModal();});
 
+let _ultimoJson='';
 window.addEventListener('message',function(ev){
   const m=ev.data;
   if(!m||m.type!=='streamlit:render')return;
   DATA=(m.args&&m.args.data)||DATA;
   if(!DATA)return;
+  const _j=JSON.stringify(DATA);
+  if(_j===_ultimoJson)return;
+  _ultimoJson=_j;
   PODE_EDITAR=!!DATA.pode_editar;
   nomesCc=DATA.nomes_cc||[];
   nomesFr=DATA.nomes_fr||[];
   render();
-  requestAnimationFrame(function(){
+  (window.requestAnimationFrame||function(f){setTimeout(f,50);})(function(){
     _msg('streamlit:setFrameHeight',{height:Math.max(420,document.documentElement.scrollHeight+24)});
   });
 });

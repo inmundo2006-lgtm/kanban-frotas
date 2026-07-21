@@ -381,8 +381,9 @@ with aba_board:
         nomes_cc_dest = ["— Sem filtro destino —"] + [c["nome"] for c in ccs] + ["📦 Sem alocação"]
         filtro_cc_destino = st.selectbox("🎯 CC de destino", nomes_cc_dest)
     with f6:
-        busca_cc = st.text_input("🔍 Buscar centro de custo", placeholder="Nome do CC...",
-                                 help="Mostra só as colunas de CC que contêm o texto digitado")
+        nomes_cc_busca = ["— Todos —"] + [c["nome"] for c in ccs] + ["📦 Sem alocação"]
+        busca_cc = st.selectbox("🔍 Buscar centro de custo", nomes_cc_busca,
+                                help="Mostra só a coluna do CC selecionado (digite para filtrar a lista)")
 
     # ── LÓGICA DO BOARD ───────────────────────
     ccs_todos = ccs + [{"id":"__sem__","nome":"📦 Sem alocação","ordem":999}]
@@ -411,9 +412,9 @@ with aba_board:
     else:
         ccs_board = ccs_todos
 
-    # Filtro por nome de centro de custo
-    if busca_cc:
-        ccs_board = [c for c in ccs_board if busca_cc.lower() in c["nome"].lower()]
+    # Filtro por centro de custo selecionado
+    if busca_cc != "— Todos —":
+        ccs_board = [c for c in ccs_board if c["nome"] == busca_cc]
 
     # IDs destacados (frotas que batem na busca/origem)
     def frota_destacada(f):
