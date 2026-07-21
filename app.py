@@ -518,7 +518,7 @@ with aba_board:
 *{{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}}
 body{{background:transparent;overflow-x:auto;}}
 #board{{display:flex;gap:12px;padding:4px 2px 16px;align-items:flex-start;min-height:480px;}}
-.column{{min-width:360px;flex:1 1 360px;background:#f8fafc;border-radius:10px;border:1px solid #e2e8f0;overflow:hidden;}}
+.column{{min-width:360px;flex:1 1 360px;max-width:50%;background:#f8fafc;border-radius:10px;border:1px solid #e2e8f0;overflow:hidden;}}
 .col-header{{padding:9px 12px;display:flex;align-items:center;justify-content:space-between;color:#fff;font-size:12px;font-weight:700;border-radius:10px 10px 0 0;}}
 .col-header.col-origem{{outline:3px solid #fbbf24;outline-offset:-2px;}}
 .col-header.col-destino{{outline:3px solid #34d399;outline-offset:-2px;}}
