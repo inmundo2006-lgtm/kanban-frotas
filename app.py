@@ -1,6 +1,6 @@
 import streamlit as st
 import streamlit.components.v1 as components
-import requests, json, time, hashlib, base64, os
+import requests, json, time, hashlib, base64, os, unicodedata
 from datetime import datetime
 import io
 from openpyxl import Workbook
@@ -12,12 +12,17 @@ st.set_page_config(page_title="Controle Frotas", page_icon="🌾",
                    layout="wide", initial_sidebar_state="collapsed")
 
 # ─────────────────────────────────────────────
-# LOGIN (2 perfis: admin / visualizador)
+# LOGIN (3 perfis: admin / dpfrotas / visualizador)
 # ─────────────────────────────────────────────
 # Usuários ficam nos secrets, em [usuarios], como:
 #   [usuarios.joao]
 #   senha_sha256 = "..."   # gerado com gerar_senha.py
-#   perfil = "admin"       # ou "visualizador"
+#   perfil = "admin"       # ou "dpfrotas", ou "visualizador"
+#
+#   admin        → exatamente o que já fazia (board, nova frota, entregas, baixas)
+#   dpfrotas     → tudo do admin + aba "Cadastro de Frotas" (placa, limite de km,
+#                  custo por km, limite de velocidade, responsável, modelo...)
+#   visualizador → somente leitura
 USUARIOS = st.secrets.get("usuarios", {})
 
 def _hash(senha: str) -> str:
@@ -58,7 +63,8 @@ if not st.session_state["auth_usuario"]:
     st.stop()
 
 PERFIL = st.session_state["auth_perfil"]
-PODE_EDITAR = PERFIL == "admin"
+PODE_EDITAR   = PERFIL in ("admin", "dpfrotas")  # admin segue idêntico ao que era
+PODE_CADASTRO = PERFIL == "dpfrotas"             # só o DP Frotas edita cadastro
 
 # ── CONFIGURAÇÃO ─────────────────────────────
 TENANT_ID     = st.secrets["TENANT_ID"]
@@ -128,6 +134,81 @@ TIPO_COR = {
     "Apoio":      ["#fee2e2","#991b1b"], "Área de Vivência": ["#e0f2fe","#075985"],
     "Outro":      ["#f3f4f6","#374151"],
 }
+
+# ─────────────────────────────────────────────
+# STATUS / SITUAÇÃO DA FROTA
+# ─────────────────────────────────────────────
+# ATENÇÃO: se a coluna Status no KanbanFrotas for do tipo "Escolha", as duas
+# novas opções ("Destinado a venda" e "Descarte") precisam ser adicionadas na
+# própria coluna no SharePoint — senão o PATCH volta erro de valor inválido.
+STATUS_ATIVO  = "Ativo"
+STATUS_BAIXA  = ["Vendido", "Destinado a venda", "Descarte"]
+
+def _chave_status(s):
+    """Normaliza pra comparar sem acento/caixa: 'Destinado à Venda' == 'destinado a venda'."""
+    s = str(s or "").strip()
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
+    return " ".join(s.upper().split())
+
+# Aceita as variações que já podem existir gravadas na lista.
+CHAVES_BAIXA = {_chave_status(x) for x in
+                STATUS_BAIXA + ["Destinado à venda", "Descartado", "Baixado"]}
+
+def esta_baixada(f):
+    """True se a frota saiu da operação (vendida, destinada a venda ou descarte)."""
+    return _chave_status(f.get("status", STATUS_ATIVO)) in CHAVES_BAIXA
+
+def rotulo_status(f):
+    return (f.get("status") or STATUS_ATIVO).strip()
+
+EMOJI_STATUS = {"VENDIDO": "🪦", "DESTINADO A VENDA": "🏷️", "DESCARTE": "♻️"}
+def emoji_status(f):
+    return EMOJI_STATUS.get(_chave_status(f.get("status", "")), "📦")
+
+# ─────────────────────────────────────────────
+# CAMPOS DE CADASTRO (vieram da LIMITE.xlsx)
+# ─────────────────────────────────────────────
+# Critério de "roda km": TipoVeiculo preenchido. Frota sem TipoVeiculo não
+# mostra limite de km / custo por km / limite de velocidade.
+CAMPOS_KM = ["LimiteKm", "CustoKm", "LimiteVel"]
+
+# Se essas 3 colunas tiverem sido criadas como TEXTO no SharePoint (e não como
+# Número), coloque CAMPOS_KM_NUMERICOS = false no secrets.toml.
+CAMPOS_KM_NUMERICOS = bool(st.secrets.get("CAMPOS_KM_NUMERICOS", True))
+
+def _para_numero(v):
+    """'1.500' → 1500 | '2,35' → 2.35 | '' → None (None limpa coluna Número)."""
+    s = str(v if v is not None else "").strip().replace("R$", "").replace(" ", "")
+    if not s:
+        return None
+    if "," in s:                      # padrão BR: ponto = milhar, vírgula = decimal
+        s = s.replace(".", "").replace(",", ".")
+    elif s.count(".") >= 1 and len(s.rsplit(".", 1)[1]) == 3:
+        s = s.replace(".", "")        # '1.500' / '12.000' = milhar, não decimal
+    try:
+        n = float(s)
+    except ValueError:
+        return None
+    return int(n) if n == int(n) else n
+
+def _valor_km(v):
+    """Valor a gravar num campo de km, respeitando o tipo da coluna."""
+    n = _para_numero(v)
+    if CAMPOS_KM_NUMERICOS:
+        return n
+    return "" if n is None else str(n).replace(".", ",")
+
+def _fmt_num(v):
+    """Mostra o número no input do jeito que o usuário digita (2,35 / 1500)."""
+    n = _para_numero(v)
+    if n is None:
+        return ""
+    return str(n).replace(".", ",")
+
+def opcoes_tipo_veiculo(lista_frotas):
+    """Opções de TipoVeiculo = o que já existe gravado na lista (nada chumbado)."""
+    return sorted({(f.get("tipo_veiculo") or "").strip()
+                   for f in lista_frotas if (f.get("tipo_veiculo") or "").strip()})
 
 # ─────────────────────────────────────────────
 # GRAPH API
@@ -204,6 +285,16 @@ def carregar_dados():
         "status":      item["fields"].get("Status","Ativo"),
         "data_venda":  item["fields"].get("DataVenda",""),
         "valor_venda": item["fields"].get("ValorVenda",""),
+        # ── campos de cadastro (ex-LIMITE.xlsx) ──
+        "placa":          item["fields"].get("Placa",""),
+        "limite_km":      item["fields"].get("LimiteKm",""),
+        "custo_km":       item["fields"].get("CustoKm",""),
+        "limite_vel":     item["fields"].get("LimiteVel",""),
+        "responsavel":    item["fields"].get("Responsavel",""),
+        "tipo_veiculo":   item["fields"].get("TipoVeiculo",""),
+        "modelo_veiculo": item["fields"].get("ModeloVeiculo",""),
+        "classe_veiculo": item["fields"].get("ClasseVeiculo",""),
+        "categoria_custo":item["fields"].get("CategoriaCusto",""),
     } for item in frotas_raw]
 
     return ccs, frentes, frotas
@@ -242,12 +333,21 @@ def mover_frente(frota_id, nova_frente):
     patch_item(LISTA_FROTAS, frota_id, {"FrenteNome": nova_frente})
     invalidar()
 
-def vender_frota(frota_id, data_venda, valor_venda, obs_venda):
+def baixar_frota(frota_id, status, data_baixa, valor_venda, obs_baixa):
+    """Tira a frota da operação. Status pode ser Vendido, Destinado a venda
+    ou Descarte — os três saem do board e caem no Histórico de Baixas."""
     patch_item(LISTA_FROTAS, frota_id, {
-        "Status": "Vendido", "CCNome": "", "FrenteNome": "",
-        "DataVenda": data_venda, "ValorVenda": valor_venda,
-        "Obs": obs_venda,
+        "Status": status, "CCNome": "", "FrenteNome": "",
+        "DataVenda": data_baixa, "ValorVenda": valor_venda,
+        "Obs": obs_baixa,
     })
+    invalidar()
+
+def salvar_cadastro(frota_id, campos):
+    """Grava os campos de cadastro (placa, limites, custo km, responsável...).
+    A mudança de LimiteKm é capturada pela rotina diária do HistoricoFrenteFrotas
+    na próxima execução — aqui não se escreve histórico."""
+    patch_item(LISTA_FROTAS, frota_id, campos)
     invalidar()
 
 def reativar_frota(frota_id):
@@ -296,9 +396,9 @@ except Exception as e:
     st.error(f"Erro ao conectar ao SharePoint: {e}")
     st.stop()
 
-# Separa ativos e vendidos
-frotas_ativas  = [f for f in frotas if f.get("status","Ativo") != "Vendido"]
-frotas_vendidas = [f for f in frotas if f.get("status","Ativo") == "Vendido"]
+# Separa ativos e baixados (vendido / destinado a venda / descarte)
+frotas_ativas   = [f for f in frotas if not esta_baixada(f)]
+frotas_baixadas = [f for f in frotas if esta_baixada(f)]
 
 # Separa entregas futuras pendentes e concluídas
 entregas_pendentes = [e for e in entregas if e.get("status","Pendente") == "Pendente"]
@@ -332,20 +432,35 @@ st.markdown("""
 st.markdown("### 🌾 Controle Frotas — Teston / Metalcana")
 _hc1, _hc2 = st.columns([5, 1])
 with _hc1:
-    _badge = "🔑 admin" if PODE_EDITAR else "👁️ visualizador"
+    _badge = ("🛠️ DP Frotas" if PODE_CADASTRO
+              else "🔑 admin" if PODE_EDITAR else "👁️ visualizador")
     st.caption(f"Usuário: **{st.session_state['auth_usuario']}** · Perfil: {_badge}")
 with _hc2:
     if st.button("Sair", use_container_width=True):
         st.session_state["auth_usuario"] = None
         st.session_state["auth_perfil"] = None
         st.rerun()
-aba_board, aba_nova, aba_entrega, aba_vendidos, aba_export = st.tabs([
-    "🗂️ Board Controle",
-    "➕ Nova Frota",
-    f"🚚 Entrega Futura ({len(entregas_pendentes)})",
-    "📋 Histórico de Baixas",
-    "📤 Exportar Relatório",
-])
+# A aba de cadastro só existe para o perfil dpfrotas — para o admin a barra de
+# abas continua exatamente igual à de antes.
+_LBL_BOARD    = "🗂️ Board Controle"
+_LBL_NOVA     = "➕ Nova Frota"
+_LBL_CADASTRO = "🛠️ Cadastro de Frotas"
+_LBL_ENTREGA  = f"🚚 Entrega Futura ({len(entregas_pendentes)})"
+_LBL_BAIXAS   = "📋 Histórico de Baixas"
+_LBL_EXPORT   = "📤 Exportar Relatório"
+
+_labels = [_LBL_BOARD, _LBL_NOVA]
+if PODE_CADASTRO:
+    _labels.append(_LBL_CADASTRO)
+_labels += [_LBL_ENTREGA, _LBL_BAIXAS, _LBL_EXPORT]
+
+_abas        = dict(zip(_labels, st.tabs(_labels)))
+aba_board    = _abas[_LBL_BOARD]
+aba_nova     = _abas[_LBL_NOVA]
+aba_cadastro = _abas.get(_LBL_CADASTRO)
+aba_entrega  = _abas[_LBL_ENTREGA]
+aba_baixas   = _abas[_LBL_BAIXAS]
+aba_export   = _abas[_LBL_EXPORT]
 
 # ══════════════════════════════════════════════
 # ABA 1 — BOARD KANBAN
@@ -761,21 +876,29 @@ render();
             except Exception as e:
                 st.error(f"Erro ao executar ação: {e}")
 
-    # ── Modal vender (via Streamlit) ──────────
+    # ── Modal de baixa (via Streamlit) ────────
     frota_id_venda = st.session_state.get("vender_frota_id", "")
     if frota_id_venda and PODE_EDITAR:
         frota_obj = next((f for f in frotas_ativas if f["id"] == frota_id_venda), None)
         if frota_obj:
             with st.form("form_venda"):
-                st.subheader(f"🪦 Marcar como vendido: {frota_obj['nome']}")
-                dv = st.date_input("Data da venda", value=datetime.today())
-                vv = st.text_input("Valor de venda (R$)", placeholder="Ex: 150000")
+                st.subheader(f"🪦 Dar baixa: {frota_obj['nome']}")
+                bs = st.selectbox("Situação", STATUS_BAIXA,
+                                  help="Vendido / Destinado a venda / Descarte — "
+                                       "nos três casos a frota sai do board.")
+                dv = st.date_input("Data", value=datetime.today())
+                vv = st.text_input("Valor de venda (R$)", placeholder="Ex: 150000",
+                                   help="Deixe em branco em descarte.")
                 ov = st.text_input("Observação", placeholder="Comprador, motivo...")
                 c1, c2 = st.columns(2)
                 with c1:
-                    if st.form_submit_button("✅ Confirmar venda", type="primary"):
-                        vender_frota(frota_id_venda, str(dv), vv, ov)
-                        st.session_state.pop("vender_frota_id", None); st.rerun()
+                    if st.form_submit_button("✅ Confirmar baixa", type="primary"):
+                        try:
+                            baixar_frota(frota_id_venda, bs, str(dv), vv, ov)
+                            st.session_state.pop("vender_frota_id", None); st.rerun()
+                        except Exception as e:
+                            st.error(f"Erro ao dar baixa: {e}  —  se a coluna Status for "
+                                     f"do tipo Escolha, adicione '{bs}' às opções no SharePoint.")
                 with c2:
                     if st.form_submit_button("Cancelar"):
                         st.session_state.pop("vender_frota_id", None); st.rerun()
@@ -786,11 +909,32 @@ render();
 with aba_nova:
     st.subheader("➕ Cadastrar nova frota")
     if not PODE_EDITAR:
-        st.info("👁️ Seu perfil é somente visualização — apenas administradores podem cadastrar frotas.")
+        st.info("👁️ Seu perfil é somente visualização — apenas admin e DP Frotas podem cadastrar frotas.")
     else:
         st.caption("Preencha os dados do novo equipamento adquirido.")
 
-        with st.form("form_nova_frota", clear_on_submit=True):
+        # Muda a cada cadastro concluído: renova as chaves dos widgets e limpa
+        # também os que estão fora do form (o clear_on_submit não alcança eles).
+        _seq = st.session_state.get("nf_seq", 0)
+
+        # ⚠️ O seletor de tipo de veículo fica FORA do st.form de propósito:
+        # dentro do form o Streamlit só reprocessa a tela no submit, e os campos
+        # de km não apareceriam/sumiriam na hora de trocar o tipo.
+        nf_tv = ""
+        if PODE_CADASTRO:
+            st.markdown("**Tipo de veículo** — preenchido = frota que roda km")
+            opc_tv = ["— Não roda km —"] + opcoes_tipo_veiculo(frotas) + ["➕ Outro (digitar)"]
+            tv_sel = st.selectbox("Tipo de veículo", opc_tv, key=f"nf_tv_{_seq}",
+                                  label_visibility="collapsed",
+                                  help="Com tipo preenchido aparecem limite de km, "
+                                       "custo por km e limite de velocidade.")
+            if tv_sel == "➕ Outro (digitar)":
+                nf_tv = st.text_input("Novo tipo de veículo", key=f"nf_tvnovo_{_seq}").strip()
+            elif tv_sel != "— Não roda km —":
+                nf_tv = tv_sel
+        roda_km = bool(nf_tv)
+
+        with st.form(f"form_nova_frota_{_seq}", clear_on_submit=True):
             c1, c2 = st.columns(2)
             with c1:
                 nn = st.text_input("Nome / Identificação *", placeholder="1600 - TRATOR NEW HOLLAND T7.245")
@@ -800,6 +944,24 @@ with aba_nova:
                 nch = st.text_input("Chassi", placeholder="HCCZ7245XXXX")
                 nan = st.text_input("Ano", placeholder="2026")
                 nobs = st.text_input("Observação", placeholder="Notas sobre o equipamento")
+
+            # ── Campos de cadastro — só DP Frotas ──
+            nplaca = nresp = nclasse = ncateg = ""
+            nlkm = nckm = nlvel = ""
+            if PODE_CADASTRO:
+                st.divider()
+                st.markdown("**Cadastro**")
+                cb1, cb2, cb3 = st.columns(3)
+                with cb1: nplaca  = st.text_input("Placa", placeholder="ABC1D23")
+                with cb2: nresp   = st.text_input("Responsável")
+                with cb3: nclasse = st.text_input("Classe do veículo")
+                ncateg = st.text_input("Categoria de custo")
+                if roda_km:
+                    st.caption(f"🚗 Tipo de veículo: **{nf_tv}** — roda km.")
+                    ck1, ck2, ck3 = st.columns(3)
+                    with ck1: nlkm  = st.text_input("Limite de km", placeholder="Ex: 3000")
+                    with ck2: nckm  = st.text_input("Custo por km (R$)", placeholder="Ex: 2,35")
+                    with ck3: nlvel = st.text_input("Limite de velocidade (km/h)", placeholder="Ex: 80")
 
             st.divider()
             st.markdown("**Alocação inicial (opcional)**")
@@ -819,14 +981,31 @@ with aba_nova:
             else:
                 cc_val = "" if ncc == "— Sem alocação (disponível) —" else ncc
                 fr_val = "" if nfr == "— Sem frente —" else nfr
-                try:
-                    criar_item(LISTA_FROTAS, {
-                        "Title": nn.strip(), "Tipo": nt, "Chassi": nch.strip(),
-                        "Ano": nan.strip(), "Obs": nobs.strip(),
-                        "CCNome": cc_val, "FrenteNome": fr_val,
-                        "Status": "Ativo", "DataVenda": "", "ValorVenda": "",
+                campos_novo = {
+                    "Title": nn.strip(), "Tipo": nt, "Chassi": nch.strip(),
+                    "Ano": nan.strip(), "Obs": nobs.strip(),
+                    "CCNome": cc_val, "FrenteNome": fr_val,
+                    "Status": STATUS_ATIVO, "DataVenda": "", "ValorVenda": "",
+                    # antes o campo Modelo era digitado e descartado — agora grava
+                    "ModeloVeiculo": nm.strip(),
+                }
+                if PODE_CADASTRO:
+                    campos_novo.update({
+                        "Placa":          nplaca.strip(),
+                        "Responsavel":    nresp.strip(),
+                        "ClasseVeiculo":  nclasse.strip(),
+                        "CategoriaCusto": ncateg.strip(),
+                        "TipoVeiculo":    nf_tv,
                     })
+                    if roda_km:
+                        for _campo, _valor in (("LimiteKm", nlkm), ("CustoKm", nckm), ("LimiteVel", nlvel)):
+                            v = _valor_km(_valor)
+                            if v not in (None, ""):
+                                campos_novo[_campo] = v
+                try:
+                    criar_item(LISTA_FROTAS, campos_novo)
                     invalidar()
+                    st.session_state["nf_seq"] = _seq + 1
                     st.success(f"✅ Frota '{nn}' cadastrada com sucesso!")
                     st.rerun()
                 except Exception as e:
@@ -846,6 +1025,152 @@ with aba_nova:
                 f'<span style="background:{bg};color:{tx};padding:1px 8px;border-radius:20px;font-size:11px;font-weight:600">{f["tipo"]}</span>'
                 f'<span style="font-size:11px;color:#6b7280">{f.get("chassi","")} {f.get("ano","")}</span>'
                 f'</div>', unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════
+# ABA 2.1 — CADASTRO DE FROTAS  (só perfil dpfrotas)
+# ══════════════════════════════════════════════
+# Edita os campos que vieram da LIMITE.xlsx e hoje moram no KanbanFrotas.
+# Não mexe em CC/frente (isso continua sendo o board) nem em Status
+# (isso continua sendo a baixa).
+if aba_cadastro is not None:
+    with aba_cadastro:
+        st.subheader("🛠️ Cadastro de Frotas")
+        st.caption("Placa, modelo, responsável e — para frota que roda km — limite de km, "
+                   "custo por km e limite de velocidade.")
+
+        _flash = st.session_state.pop("cad_flash", "")
+        if _flash:
+            st.success(_flash)
+
+        _sem_cadastro = sum(1 for f in frotas_ativas if not (f.get("tipo_veiculo") or "").strip())
+        st.caption(f"{len(frotas_ativas)} frotas ativas · {_sem_cadastro} sem tipo de veículo definido")
+
+        bc1, bc2 = st.columns([3, 1])
+        with bc1:
+            busca_cad = st.text_input("🔍 Buscar frota", placeholder="Número, nome ou placa...",
+                                      key="busca_cad")
+        with bc2:
+            so_sem_cad = st.checkbox("Só sem cadastro", key="so_sem_cad",
+                                     help="Frotas sem tipo de veículo e sem placa")
+
+        def _match_cad(f):
+            if so_sem_cad and ((f.get("tipo_veiculo") or "").strip() or (f.get("placa") or "").strip()):
+                return False
+            if not busca_cad:
+                return True
+            t = busca_cad.lower()
+            return t in f["nome"].lower() or t in str(f.get("placa") or "").lower()
+
+        cad_vis = sorted([f for f in frotas_ativas if _match_cad(f)], key=lambda x: x["nome"])
+
+        if not cad_vis:
+            st.info("Nenhuma frota encontrada com esse filtro.")
+        else:
+            _opc_cad = [f'{f["nome"]}  ·  {f.get("placa") or "sem placa"}' for f in cad_vis]
+            _i_cad = st.selectbox("Frota", range(len(_opc_cad)),
+                                  format_func=lambda i: _opc_cad[i], key="sel_cad")
+            frota_cad = cad_vis[_i_cad]
+            fid = frota_cad["id"]
+
+            st.markdown(f"**{frota_cad['nome']}** · {frota_cad['tipo']} · "
+                        f"chassi {frota_cad.get('chassi') or '—'} · "
+                        f"CC: {frota_cad.get('cc_nome') or 'sem alocação'}")
+
+            # ⚠️ Fora do st.form de propósito: trocar o tipo precisa redesenhar a
+            # tela na hora pra mostrar/esconder os campos de km.
+            atual_tv = (frota_cad.get("tipo_veiculo") or "").strip()
+            opc_tv   = ["— Não roda km —"] + opcoes_tipo_veiculo(frotas) + ["➕ Outro (digitar)"]
+            if atual_tv and atual_tv not in opc_tv:
+                opc_tv.insert(1, atual_tv)
+            tv_sel = st.selectbox("Tipo de veículo", opc_tv,
+                                  index=opc_tv.index(atual_tv) if atual_tv in opc_tv else 0,
+                                  key=f"cad_tv_{fid}",
+                                  help="Preenchido = frota que roda km. Vazio esconde os campos de km.")
+            tv_val = ""
+            if tv_sel == "➕ Outro (digitar)":
+                tv_val = st.text_input("Novo tipo de veículo", key=f"cad_tvnovo_{fid}").strip()
+            elif tv_sel != "— Não roda km —":
+                tv_val = tv_sel
+            roda_km_cad = bool(tv_val)
+            tinha_tv    = bool(atual_tv)
+            tem_km_grav = any(_para_numero(frota_cad.get(k)) is not None
+                              for k in ("limite_km", "custo_km", "limite_vel"))
+
+            if not roda_km_cad and tem_km_grav and not tinha_tv:
+                st.warning("Essa frota tem valores de km gravados mas está sem tipo de veículo. "
+                           "Os campos ficam ocultos e os valores são preservados — defina o tipo "
+                           "para poder editá-los.")
+
+            with st.form(f"form_cadastro_{fid}"):
+                g1, g2, g3 = st.columns(3)
+                with g1:
+                    e_placa = st.text_input("Placa", value=frota_cad.get("placa") or "",
+                                            key=f"cad_placa_{fid}", placeholder="ABC1D23")
+                with g2:
+                    e_modelo = st.text_input("Modelo", value=frota_cad.get("modelo_veiculo") or "",
+                                             key=f"cad_mod_{fid}")
+                with g3:
+                    e_resp = st.text_input("Responsável", value=frota_cad.get("responsavel") or "",
+                                           key=f"cad_resp_{fid}")
+                g4, g5 = st.columns(2)
+                with g4:
+                    e_classe = st.text_input("Classe do veículo",
+                                             value=frota_cad.get("classe_veiculo") or "",
+                                             key=f"cad_classe_{fid}")
+                with g5:
+                    e_categ = st.text_input("Categoria de custo",
+                                            value=frota_cad.get("categoria_custo") or "",
+                                            key=f"cad_categ_{fid}")
+
+                e_lkm = e_ckm = e_lvel = ""
+                if roda_km_cad:
+                    st.divider()
+                    st.markdown(f"**Km** — tipo de veículo: {tv_val}")
+                    k1, k2, k3 = st.columns(3)
+                    with k1:
+                        e_lkm = st.text_input("Limite de km",
+                                              value=_fmt_num(frota_cad.get("limite_km")),
+                                              key=f"cad_lkm_{fid}")
+                    with k2:
+                        e_ckm = st.text_input("Custo por km (R$)",
+                                              value=_fmt_num(frota_cad.get("custo_km")),
+                                              key=f"cad_ckm_{fid}")
+                    with k3:
+                        e_lvel = st.text_input("Limite de velocidade (km/h)",
+                                               value=_fmt_num(frota_cad.get("limite_vel")),
+                                               key=f"cad_lvel_{fid}")
+                    st.caption("Mudança de limite de km é capturada pela rotina diária do "
+                               "HistoricoFrenteFrotas na próxima execução.")
+                elif tinha_tv:
+                    st.warning("Você removeu o tipo de veículo: ao salvar, limite de km, "
+                               "custo por km e limite de velocidade serão apagados.")
+
+                salvar_cad = st.form_submit_button("💾 Salvar cadastro", type="primary",
+                                                   use_container_width=True)
+
+            if salvar_cad:
+                campos_cad = {
+                    "Placa":          e_placa.strip(),
+                    "ModeloVeiculo":  e_modelo.strip(),
+                    "Responsavel":    e_resp.strip(),
+                    "ClasseVeiculo":  e_classe.strip(),
+                    "CategoriaCusto": e_categ.strip(),
+                    "TipoVeiculo":    tv_val,
+                }
+                if roda_km_cad:
+                    campos_cad["LimiteKm"]  = _valor_km(e_lkm)
+                    campos_cad["CustoKm"]   = _valor_km(e_ckm)
+                    campos_cad["LimiteVel"] = _valor_km(e_lvel)
+                elif tinha_tv:
+                    # tipo removido de propósito → limpa os km junto
+                    for _c in CAMPOS_KM:
+                        campos_cad[_c] = None if CAMPOS_KM_NUMERICOS else ""
+                try:
+                    salvar_cadastro(fid, campos_cad)
+                    st.session_state["cad_flash"] = f"✅ Cadastro de '{frota_cad['nome']}' salvo."
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao salvar: {e}")
 
 # ══════════════════════════════════════════════
 # ABA 3 — ENTREGA FUTURA
@@ -984,36 +1309,43 @@ with aba_entrega:
 # ══════════════════════════════════════════════
 # ABA 4 — FROTAS VENDIDAS / DESCARTE
 # ══════════════════════════════════════════════
-with aba_vendidos:
-    st.subheader(f"📋 Histórico de Baixas — {len(frotas_vendidas)} equipamentos")
-    st.caption("Equipamentos vendidos, descartados ou baixados do patrimônio.")
+with aba_baixas:
+    st.subheader(f"📋 Histórico de Baixas — {len(frotas_baixadas)} equipamentos")
+    st.caption("Equipamentos vendidos, destinados a venda ou descartados — todos fora do board.")
 
-    if not frotas_vendidas:
-        st.info("Nenhuma frota vendida ou descartada ainda.")
+    if not frotas_baixadas:
+        st.info("Nenhuma frota baixada ainda.")
     else:
         # Filtros
-        bv1, bv2 = st.columns([2,2])
+        bv1, bv2, bv3 = st.columns([2,2,2])
         with bv1:
             busca_v = st.text_input("🔍 Buscar", placeholder="Nome...", key="busca_v")
         with bv2:
             filtro_tipo_v = st.multiselect("Tipo", TIPOS, default=[], key="ft_v", placeholder="Todos")
+        with bv3:
+            filtro_sit_v = st.multiselect("Situação", STATUS_BAIXA, default=[], key="fs_v",
+                                          placeholder="Todas")
 
-        vendidos_vis = [f for f in frotas_vendidas
+        _chaves_sit = {_chave_status(s) for s in filtro_sit_v}
+        vendidos_vis = [f for f in frotas_baixadas
                         if (not busca_v or busca_v.lower() in f["nome"].lower())
-                        and (not filtro_tipo_v or f["tipo"] in filtro_tipo_v)]
+                        and (not filtro_tipo_v or f["tipo"] in filtro_tipo_v)
+                        and (not _chaves_sit or _chave_status(f.get("status","")) in _chaves_sit)]
 
-        st.markdown(f"*Exibindo {len(vendidos_vis)} de {len(frotas_vendidas)}*")
+        st.markdown(f"*Exibindo {len(vendidos_vis)} de {len(frotas_baixadas)}*")
         st.divider()
 
         for f in sorted(vendidos_vis, key=lambda x: x.get("data_venda",""), reverse=True):
             bg, tx = TIPO_COR.get(f["tipo"], ["#f3f4f6","#374151"])
-            with st.expander(f"🪦 {f['nome']} — vendido em {f.get('data_venda','?')}"):
+            with st.expander(f"{emoji_status(f)} {f['nome']} — {rotulo_status(f).lower()} "
+                             f"em {f.get('data_venda','?')}"):
                 c1,c2,c3 = st.columns(3)
                 c1.markdown(f"**Tipo:** {f['tipo']}")
                 c1.markdown(f"**Chassi:** {f.get('chassi','—')}")
                 c2.markdown(f"**Ano:** {f.get('ano','—')}")
                 c2.markdown(f"**Valor venda:** R$ {f.get('valor_venda','—')}")
-                c3.markdown(f"**Data venda:** {f.get('data_venda','—')}")
+                c3.markdown(f"**Situação:** {rotulo_status(f)}")
+                c3.markdown(f"**Data:** {f.get('data_venda','—')}")
                 c3.markdown(f"**Obs:** {f.get('obs','—')}")
                 if PODE_EDITAR and st.button("↩️ Reativar frota", key=f"reativ_{f['id']}"):
                     reativar_frota(f["id"])
@@ -1039,7 +1371,7 @@ with aba_export:
     inc_det  = ea.checkbox("Alocação detalhada", value=True)
     inc_cc   = eb.checkbox("Resumo por CC",       value=True)
     inc_fr   = ec.checkbox("Por frente",          value=True)
-    inc_vend = ed.checkbox("Vendidos/Descarte",   value=False)
+    inc_vend = ed.checkbox("Baixas (venda/descarte)", value=False)
 
     if st.button("⬇️ Gerar Excel", type="primary", use_container_width=True):
 
@@ -1144,21 +1476,22 @@ with aba_export:
                 ws3.column_dimensions[get_column_letter(ci)].width=w
 
         if inc_vend:
-            ws4 = wb_e.create_sheet("Vendidos-Descarte")
-            ws4.merge_cells("A1:G1"); ws4["A1"]="FROTAS VENDIDAS / DESCARTE"
+            ws4 = wb_e.create_sheet("Baixas")
+            ws4.merge_cells("A1:H1")
+            ws4["A1"]="FROTAS BAIXADAS — VENDIDAS / DESTINADAS A VENDA / DESCARTE"
             ws4["A1"].font=Font(bold=True,size=12,color="FFFFFF")
             ws4["A1"].fill=PatternFill("solid",fgColor="A32D2D")
             ws4["A1"].alignment=Alignment(horizontal="center",vertical="center")
             ws4.row_dimensions[1].height=26
-            hdrs4=["Frota","Tipo","Chassi","Ano","Data Venda","Valor Venda (R$)","Observação"]
+            hdrs4=["Frota","Tipo","Situação","Chassi","Ano","Data","Valor Venda (R$)","Observação"]
             for ci,h in enumerate(hdrs4,1): ws4.cell(row=2,column=ci,value=h)
-            hdr_s(ws4,2,range(1,8),"791F1F"); r4=3
-            for f in sorted(frotas_vendidas, key=lambda x:x.get("data_venda",""), reverse=True):
-                linha4=[f["nome"],f["tipo"],f.get("chassi",""),f.get("ano",""),
+            hdr_s(ws4,2,range(1,9),"791F1F"); r4=3
+            for f in sorted(frotas_baixadas, key=lambda x:x.get("data_venda",""), reverse=True):
+                linha4=[f["nome"],f["tipo"],rotulo_status(f),f.get("chassi",""),f.get("ano",""),
                         f.get("data_venda",""),f.get("valor_venda",""),f.get("obs","")]
                 for ci,v in enumerate(linha4,1): ws4.cell(row=r4,column=ci,value=v)
-                lin_s(ws4,r4,range(1,8),"FEF2F2" if r4%2==0 else "FFFFFF"); r4+=1
-            for ci,w in zip(range(1,8),[32,14,22,8,14,16,24]):
+                lin_s(ws4,r4,range(1,9),"FEF2F2" if r4%2==0 else "FFFFFF"); r4+=1
+            for ci,w in zip(range(1,9),[32,14,18,22,8,14,16,24]):
                 ws4.column_dimensions[get_column_letter(ci)].width=w
 
         buf=io.BytesIO(); wb_e.save(buf); buf.seek(0)
